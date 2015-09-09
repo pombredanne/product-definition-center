@@ -40,7 +40,6 @@ router.register(r'release-types', release_views.ReleaseTypeViewSet, base_name='r
 router.register(r'persons', contact_views.PersonViewSet)
 router.register(r'maillists', contact_views.MaillistViewSet)
 router.register(r'contact-roles', contact_views.ContactRoleViewSet)
-router.register(r'role-contacts', contact_views.RoleContactViewSet)
 
 # register component view sets
 router.register(r'labels', common_views.LabelViewSet, base_name='label')
@@ -48,7 +47,7 @@ router.register(r'labels', common_views.LabelViewSet, base_name='label')
 router.register(r'global-components',
                 component_views.GlobalComponentViewSet,
                 base_name='globalcomponent')
-router.register(r'global-components/(?P<instance_pk>[^/.]+)/contacts',
+router.register(r'global-component-contacts',
                 component_views.GlobalComponentContactViewSet,
                 base_name='globalcomponentcontact')
 router.register(r'global-components/(?P<instance_pk>[^/.]+)/labels',
@@ -57,7 +56,7 @@ router.register(r'global-components/(?P<instance_pk>[^/.]+)/labels',
 router.register(r'release-components',
                 component_views.ReleaseComponentViewSet,
                 base_name='releasecomponent')
-router.register(r'release-components/(?P<instance_pk>[^/.]+)/contacts',
+router.register(r'release-component-contacts',
                 component_views.ReleaseComponentContactViewSet,
                 base_name='releasecomponentcontact')
 router.register(r'bugzilla-components',

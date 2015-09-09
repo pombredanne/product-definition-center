@@ -6,23 +6,21 @@
 import json
 
 from django.contrib.contenttypes.models import ContentType
-from django.core.urlresolvers import reverse
 from django.shortcuts import get_object_or_404
-from django.utils import six
-from django.utils.text import capfirst
 
 from rest_framework import serializers
 from rest_framework.validators import UniqueTogetherValidator
 
-from pdc.apps.contact.models import Contact, ContactRole
-from pdc.apps.contact.serializers import RoleContactSerializer
 from pdc.apps.common.serializers import DynamicFieldsSerializerMixin, LabelSerializer, StrictSerializerMixin
 from pdc.apps.common.fields import ChoiceSlugField
 from pdc.apps.release.models import Release
 from pdc.apps.common.hacks import convert_str_to_int
+from pdc.apps.contact.serializers import ContactField
+from pdc.apps.contact import models as contact_models
 from .models import (GlobalComponent,
-                     RoleContact,
+                     GCContact,
                      ReleaseComponent,
+                     RCContact,
                      Upstream,
                      BugzillaComponent,
                      ReleaseComponentGroup,
@@ -36,7 +34,6 @@ from . import signals
 __all__ = (
     'GlobalComponentSerializer',
     'ReleaseComponentSerializer',
-    'HackedContactSerializer',
     'UpstreamSerializer',
     'BugzillaComponentSerializer',
     'GroupSerializer',
@@ -44,144 +41,74 @@ __all__ = (
 )
 
 
-def reverse_url(request, view_name, **kwargs):
-    return request.build_absolute_uri(reverse(viewname=view_name,
-                                              kwargs=kwargs))
-
-
-class HackedContactSerializer(RoleContactSerializer):
-    """
-    Could use as a view leveled serializer to encode/decode the contact data, or
-    as a field in the global/release component.
-
-    Automatically replace the url with /[global|release]-components/<instance_pk>/contacts/<pk>.
-    Automatically set inherited = True when serialize release component.
-    """
-
-    def __init__(self, *args, **kwargs):
-        self.inherited = kwargs.pop('inherited', False)
-        self.view_name = kwargs.pop('view_name', 'globalcomponentcontact-detail')
-        context = kwargs.get('context', None)
-        self.instance_pk = None
-        self.view = None
-        # Set view/instance_pk when uses the class as a serializer.
-        if context:
-            self.view = context.get('view', None)
-            extra_kwargs = context.get('extra_kwargs', None)
-            if extra_kwargs:
-                self.instance_pk = extra_kwargs.get('instance_pk', None)
-        super(HackedContactSerializer, self).__init__(*args, **kwargs)
-
-    def to_representation(self, obj):
-        ret = super(HackedContactSerializer, self).to_representation(obj)
-        request = self.context.get('request', None)
-        url_kwargs = self.context.get('extra_kwargs', {})
-        # NOTE(xchu): The `instance_pk` is needed for building a valid url,
-        #             so if not provided, we should raise `KeyError`.
-        instance_pk = url_kwargs['instance_pk']
-        ret['url'] = reverse_url(request, self.view_name, **{
-            'instance_pk': instance_pk,
-            'pk': obj.pk
-        })
-        if self.inherited and self.view_name == 'globalcomponentcontact-detail':
-            ret['inherited'] = True
-        return ret
-
-    def to_internal_value(self, data):
-        # Run StrictSerializerMixin's to_internal_value() to check if extra field exists.
-        super(HackedContactSerializer, self).to_internal_value(data)
-        request = self.context.get('request', None)
-        serializer = RoleContactSerializer(data=data,
-                                           many=not isinstance(data, dict),
-                                           context={'request': request})
-
-        kwargs = {}
-        kwargs['contact_role'] = data.get('contact_role')
-        kwargs.update(data.get('contact'))
-        try:
-            contact = RoleContact.specific_objects.get(**kwargs)
-        except (RoleContact.DoesNotExist, Contact.DoesNotExist, ContactRole.DoesNotExist):
-            # If we can't get RoleContact in database, validate the input data and create the RoleContact.
-            if serializer.is_valid(raise_exception=True):
-                contact = RoleContact.specific_objects.create(**kwargs)
-                if request and request.changeset:
-                    model_name = ContentType.objects.get_for_model(contact).model
-                    request.changeset.add(model_name,
-                                          contact.id,
-                                          'null',
-                                          json.dumps(contact.export()))
-        component_class = self.view.model
-
-        if component_class.objects.get(pk=self.instance_pk).contacts.filter(pk=contact.pk).exists():
-            model_name = six.text_type(capfirst(component_class._meta.verbose_name))
-            raise serializers.ValidationError({"detail": "%s contact with this %s and Contact already exists."
-                                              % (model_name, model_name)})
-        else:
-            return contact
-
-    def save(self, **kwargs):
-        """
-        Save the deserialized object and return it.
-        """
-
-        instance_pk = self.context['extra_kwargs']['instance_pk']
-        component_class = self.context['view'].model
-        component = component_class.objects.get(pk=instance_pk)
-        existed_contacts = component.contacts.all()
-
-        if isinstance(self.validated_data, list):
-            contacts = [self.get_object_from_db(item) for item in self.validated_data if item not in existed_contacts]
-
-            component.contacts.add(*contacts)
-
-            if self.validated_data['_deleted']:
-                [self.delete_object(item) for item in self.validated_data['_deleted']]
-        else:
-            contacts = self.get_object_from_db(self.validated_data)
-            component.contacts.add(contacts)
-
-        return contacts
-
-    def get_object_from_db(self, item):
-        contact = RoleContact.objects.get(**{
-            'contact_role_id': item.contact_role_id,
-            'contact_id': item.contact_id
-        })
-
-        return contact
-
-    class Meta:
-        model = RoleContact
-        fields = ('url', 'contact_role', 'contact')
-        # In order not to run parent's validators, set validators to []
-        validators = []
-
-
-class HackedContactField(serializers.Field):
-    """
-    HackedContactField is used in GlobalComponentSerializer/ReleaseComponentSerializer insteadof HackedContactSerilizer.
-    It has the ablility to get_attribute() from GlobalComponentSerializer/ReleaseComponentSerializer.
-    """
-
-    def __init__(self, view_name, *args, **kwargs):
-        self.view_name = view_name
-        super(HackedContactField, self).__init__(*args, **kwargs)
+class ReleaseComponentRelatedField(serializers.RelatedField):
+    doc_format = '{"id": "int", "name": "string"}'
 
     def to_representation(self, value):
-        serializer = HackedContactSerializer(value, many=True, context=self.context, view_name=self.view_name)
-        return serializer.data
+        result = dict()
+        if value:
+            result['id'] = value.id
+            result['name'] = value.name
+        return result
 
-    def get_attribute(self, obj):
-        """
-        Get attribute from the serializer which uses this field.
+    def to_internal_value(self, data):
+        if not isinstance(data, dict):
+            raise serializers.ValidationError({'detail': "Input [%s] for ReleaseComponent must be a dict." % data})
 
-        @param obj: The model object related to the serializer.
-        """
-        # NOTE(xchu): The `instance_pk` is needed for building a valid url,
-        #             it's not provided when used as a field, so we should inject one.
-        if 'extra_kwargs' not in self.context or 'instance_pk' not in self.context['extra_kwargs']:
-            self.context['extra_kwargs'] = {'instance_pk': obj.pk}
-        return obj.contacts.all()
+        if set(data.keys()) not in [set(['id']), set(['release', 'global_component', 'name'])]:
+            raise serializers.ValidationError(
+                {'detail': "Only accept ['id'] or ['release', 'global_component', 'name']"})
+
+        kwargs = dict()
+        if 'id' in data:
+            kwargs['id'] = convert_str_to_int(data.get('id'))
+        else:
+            kwargs['release__release_id'] = data.get('release')
+            kwargs['global_component__name'] = data.get('global_component')
+            kwargs['name'] = data.get('name')
+        try:
+            rc = ReleaseComponent.objects.get(**kwargs)
+        except ReleaseComponent.DoesNotExist:
+            raise serializers.ValidationError({'detail': "ReleaseComponent [%s] doesn't exist" % data})
+        return rc
+
+
+class FullRCField(ReleaseComponentRelatedField):
+    doc_format = '{"id": "int", "name": "string", "release": "Release.release_id"}'
+
+    def __init__(self, **kwargs):
+        super(FullRCField, self).__init__(queryset=ReleaseComponent.objects.all(), **kwargs)
+
+    def to_representation(self, value):
+        result = dict()
+        if value:
+            result['id'] = value.id
+            result['name'] = value.name
+            result['release'] = value.release.release_id
+        return result
+
+
+class GCContactSerializer(serializers.ModelSerializer):
+    role = ChoiceSlugField(source='contact_role', slug_field='name',
+                           queryset=contact_models.ContactRole.objects.all())
+    component = serializers.SlugRelatedField(slug_field='name',
+                                             queryset=GlobalComponent.objects.all())
+    contact = ContactField()
+
+    class Meta:
+        model = GCContact
+        fields = ('id', 'component', 'role', 'contact')
+
+
+class RCContactSerializer(serializers.ModelSerializer):
+    role = ChoiceSlugField(source='contact_role', slug_field='name',
+                           queryset=contact_models.ContactRole.objects.all())
+    component = FullRCField()
+    contact = ContactField()
+
+    class Meta:
+        model = RCContact
+        fields = ('id', 'component', 'role', 'contact')
 
 
 class UpstreamSerializer(StrictSerializerMixin, serializers.ModelSerializer):
@@ -224,7 +151,6 @@ class UpstreamRelatedField(serializers.RelatedField):
 class GlobalComponentSerializer(DynamicFieldsSerializerMixin,
                                 StrictSerializerMixin,
                                 serializers.HyperlinkedModelSerializer):
-    contacts = HackedContactField(required=False, read_only=False, view_name='globalcomponentcontact-detail')
     name = serializers.CharField(required=True,
                                  max_length=100)
     dist_git_path = serializers.CharField(required=False,
@@ -238,7 +164,7 @@ class GlobalComponentSerializer(DynamicFieldsSerializerMixin,
 
     class Meta:
         model = GlobalComponent
-        fields = ('id', 'name', 'dist_git_path', 'dist_git_web_url', 'contacts', 'labels', 'upstream')
+        fields = ('id', 'name', 'dist_git_path', 'dist_git_web_url', 'labels', 'upstream')
 
 
 class TreeForeignKeyField(serializers.Field):
@@ -329,15 +255,15 @@ class ReleaseComponentSerializer(DynamicFieldsSerializerMixin,
     """
 
     release = ReleaseField(read_only=False)
-    global_component = serializers.SlugRelatedField(slug_field='name', read_only=False, queryset=GlobalComponent.objects.all())
-    contacts = HackedContactField(required=False, read_only=False, view_name='releasecomponentcontact-detail')
+    global_component = serializers.SlugRelatedField(slug_field='name', read_only=False,
+                                                    queryset=GlobalComponent.objects.all())
     dist_git_branch = serializers.CharField(source='inherited_dist_git_branch', required=False)
     dist_git_web_url = serializers.URLField(required=False, max_length=200, read_only=True)
     bugzilla_component = TreeForeignKeyField(read_only=False, required=False, allow_null=True)
     brew_package = serializers.CharField(required=False)
     active = serializers.BooleanField(required=False, default=True)
-    type = ChoiceSlugField(slug_field='name', queryset=ReleaseComponentType.objects.all(), required=False,
-                           allow_null=True)
+    type = ChoiceSlugField(slug_field='name', queryset=ReleaseComponentType.objects.all(),
+                           required=False, allow_null=True)
 
     def update(self, instance, validated_data):
         signals.releasecomponent_serializer_extract_data.send(sender=self, validated_data=validated_data)
@@ -356,24 +282,6 @@ class ReleaseComponentSerializer(DynamicFieldsSerializerMixin,
         instance = super(ReleaseComponentSerializer, self).create(validated_data)
         signals.releasecomponent_serializer_post_create.send(sender=self, release_component=instance)
         return instance
-
-    def to_representation(self, instance):
-        ret = super(ReleaseComponentSerializer, self).to_representation(instance)
-        request = self.context.get("request", None)
-        # Include global component contacts - PDC-184
-        gcs = GlobalComponentSerializer(
-            instance=instance.global_component,
-            context={'request': request})
-        # Exclude global component contacts whose contact_role are already in release component contacts
-        gcc = gcs.data.get('contacts', [])
-        contacts = ret.get('contacts', [])
-        contact_role_lists = [contact['contact_role'] for contact in contacts]
-        for contact in gcc:
-            if contact['contact_role'] in contact_role_lists:
-                continue
-            contact['inherited'] = True
-            contacts.append(contact)
-        return ret
 
     def to_internal_value(self, data):
         # Raise error explictly when release and global_component are given.
@@ -427,8 +335,7 @@ class ReleaseComponentSerializer(DynamicFieldsSerializerMixin,
     class Meta:
         model = ReleaseComponent
         fields = ('id', 'release', 'bugzilla_component', 'brew_package', 'global_component',
-                  'name', 'dist_git_branch', 'dist_git_web_url', 'active',
-                  'contacts', 'type')
+                  'name', 'dist_git_branch', 'dist_git_web_url', 'active', 'type')
         validators = [UniqueTogetherValidator(
             queryset=ReleaseComponent.objects.all(),
             fields=('name', 'release', 'global_component')
@@ -441,38 +348,6 @@ class GroupTypeSerializer(StrictSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = GroupType
         fields = ('id', 'name', 'description')
-
-
-class ReleaseComponentRelatedField(serializers.RelatedField):
-    doc_format = '{"id": "int", "name": "string"}'
-
-    def to_representation(self, value):
-        result = dict()
-        if value:
-            result['id'] = value.id
-            result['name'] = value.name
-        return result
-
-    def to_internal_value(self, data):
-        if not isinstance(data, dict):
-            raise serializers.ValidationError({'detail': "Input [%s] for ReleaseComponent must be a dict." % data})
-
-        if set(data.keys()) not in [set(['id']), set(['release', 'global_component', 'name'])]:
-            raise serializers.ValidationError(
-                {'detail': "Only accept ['id'] or ['release', 'global_component', 'name']"})
-
-        kwargs = dict()
-        if 'id' in data:
-            kwargs['id'] = convert_str_to_int(data.get('id'))
-        else:
-            kwargs['release__release_id'] = data.get('release')
-            kwargs['global_component__name'] = data.get('global_component')
-            kwargs['name'] = data.get('name')
-        try:
-            rc = ReleaseComponent.objects.get(**kwargs)
-        except ReleaseComponent.DoesNotExist:
-            raise serializers.ValidationError({'detail': "ReleaseComponent [%s] doesn't exist" % data})
-        return rc
 
 
 class GroupSerializer(StrictSerializerMixin, serializers.ModelSerializer):
@@ -522,18 +397,6 @@ class RCRelationshipTypeSerializer(StrictSerializerMixin, serializers.ModelSeria
         fields = ('name',)
 
 
-class RCForRelationshipRelatedField(ReleaseComponentRelatedField):
-    doc_format = '{"id": "int", "name": "string", "release": "Release.release_id"}'
-
-    def to_representation(self, value):
-        result = dict()
-        if value:
-            result['id'] = value.id
-            result['name'] = value.name
-            result['release'] = value.release.release_id
-        return result
-
-
 class ReleaseComponentRelationshipSerializer(StrictSerializerMixin, serializers.ModelSerializer):
     type = ChoiceSlugField(
         queryset=ReleaseComponentRelationshipType.objects.all(),
@@ -541,14 +404,8 @@ class ReleaseComponentRelationshipSerializer(StrictSerializerMixin, serializers.
         required=True,
         source='relation_type'
     )
-    from_component = RCForRelationshipRelatedField(
-        required=True,
-        queryset=ReleaseComponent.objects.all()
-    )
-    to_component = RCForRelationshipRelatedField(
-        required=True,
-        queryset=ReleaseComponent.objects.all()
-    )
+    from_component = FullRCField(required=True)
+    to_component = FullRCField(required=True)
 
     class Meta:
         model = ReleaseComponentRelationship

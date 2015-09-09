@@ -19,11 +19,12 @@ from rest_framework.response import Response
 
 from pdc.apps.common import viewsets
 from pdc.apps.common.models import Label
-from pdc.apps.contact.models import RoleContact, ContactRole
 from pdc.apps.common.serializers import LabelSerializer, StrictSerializerMixin
 from pdc.apps.common.filters import LabelFilter
 from .models import (GlobalComponent,
+                     GCContact,
                      ReleaseComponent,
+                     RCContact,
                      BugzillaComponent,
                      ReleaseComponentGroup,
                      GroupType,
@@ -31,8 +32,9 @@ from .models import (GlobalComponent,
                      ReleaseComponentType,
                      ReleaseComponentRelationshipType)
 from .serializers import (GlobalComponentSerializer,
+                          GCContactSerializer,
                           ReleaseComponentSerializer,
-                          HackedContactSerializer,
+                          RCContactSerializer,
                           BugzillaComponentSerializer,
                           GroupSerializer,
                           GroupTypeSerializer,
@@ -41,7 +43,6 @@ from .serializers import (GlobalComponentSerializer,
                           RCRelationshipTypeSerializer)
 from .filters import (ComponentFilter,
                       ReleaseComponentFilter,
-                      RoleContactFilter,
                       BugzillaComponentFilter,
                       GroupFilter,
                       GroupTypeFilter,
@@ -49,25 +50,14 @@ from .filters import (ComponentFilter,
 from . import signals
 
 
-class HackedComponentContactMixin(object):
+class GlobalComponentContactViewSet(viewsets.PDCModelViewSet):
+    queryset = GCContact.objects.all()
+    serializer_class = GCContactSerializer
 
-    def perform_create(self, serializer):
-        # NOTE(xchu): The Creation of ComponentContact is a UPDATE to
-        #             Component instance, the changes about contact have
-        #             been recorded by `serializer.to_internal_value`, so we
-        #             need to record the change about Component itself instead of
-        #             the creation of serializer's object as defined in the
-        #             `ChangeSetCreateModelMixin`.
-        pk = self.kwargs.get("instance_pk", None)
-        component = get_object_or_404(self.model, id=pk)
-        old_value = json.dumps(component.export())
 
-        serializer.save()
-
-        request = self.get_serializer_context().get('request', None)
-        if request and request.changeset:
-            request.changeset.add(self.model.__name__.lower(), component.pk,
-                                  old_value, json.dumps(component.export()))
+class ReleaseComponentContactViewSet(viewsets.PDCModelViewSet):
+    queryset = RCContact.objects.all()
+    serializer_class = RCContactSerializer
 
 
 class GlobalComponentViewSet(viewsets.PDCModelViewSet):
@@ -315,166 +305,6 @@ class GlobalComponentViewSet(viewsets.PDCModelViewSet):
             curl -X DELETE -H "Content-Type: application/json" $URL:globalcomponent-detail:4181$
         """
         return super(GlobalComponentViewSet, self).destroy(request, *args, **kwargs)
-
-
-class GlobalComponentContactViewSet(HackedComponentContactMixin,
-                                    viewsets.PDCModelViewSet):
-    """
-    ##Overview##
-
-    This page shows the usage of the **Global Component Contact API**, please
-    see the following for more details.
-
-    ##Test tools##
-
-    You can use ``curl`` in terminal, with -X _method_ (GET|POST|PUT|DELETE),
-    -d _data_ (a json string). or GUI plugins for
-    browsers, such as ``RESTClient``, ``RESTConsole``.
-    """
-
-    model = GlobalComponent
-    queryset = GlobalComponent.objects.all()
-    serializer_class = HackedContactSerializer
-    filter_class = RoleContactFilter
-
-    def get_queryset(self):
-        gc_id = self.kwargs.get('instance_pk')
-        try:
-            gc = get_object_or_404(GlobalComponent, id=gc_id)
-        except ValueError:
-            # Raised when non-numeric instance_pk is given.
-            raise Http404('Global component with id=%s not found' % gc_id)
-        return gc.contacts.all()
-
-    def list(self, request, *args, **kwargs):
-        """
-        __Method__:
-        GET
-
-        __URL__: $LINK:globalcomponentcontact-list:gc_instance_pk$
-
-        __Query Params__:
-
-        %(FILTERS)s
-
-        The `contact_role` filter must be used together with `email`.
-
-        __Response__:
-
-            [
-                {
-                    "url": url,
-                    "contact_role": string,
-                    "contact": {
-                        <"mail_name"|"username">: string,
-                        "email": string
-                    }
-                },
-                ......
-            ]
-        """
-        # NOTE: we disable pagination because release component contact could
-        #       not do the things like this, and we must keep the outputs same.
-        #       it is a very very dirty hack for current version. we will use
-        #       database view to refactor release component in next sprint.
-        #       then we could enable pagination.
-        self.object_list = self.filter_queryset(self.get_queryset())
-        serializer = self.get_serializer(self.object_list, many=True)
-        return Response(serializer.data)
-
-    def retrieve(self, request, *args, **kwargs):
-        """
-        __Method__:
-        GET
-
-        __URL__: $LINK:globalcomponentcontact-detail:gc_instance_pk:relation_pk$
-
-        __Response__:
-
-            {
-                "url": url,
-                "contact_role": string,
-                "contact": {
-                    <"mail_name"|"username">: string,
-                    "email": string
-                }
-            }
-        """
-        return super(GlobalComponentContactViewSet, self).retrieve(request, *args, **kwargs)
-
-    def update(self, request, *args, **kwargs):
-        return self.http_method_not_allowed(request, *args, **kwargs)
-
-    def bulk_update(self, request, *args, **kwargs):
-        return self.http_method_not_allowed(request, *args, **kwargs)
-
-    def destroy(self, request, *args, **kwargs):
-        """
-        __Method__:
-        DELETE
-
-        __URL__: $LINK:globalcomponentcontact-detail:gc_instance_pk:relation_pk$
-
-        __Response__:
-
-            STATUS: 204 NO CONTENT
-
-        __Example__:
-
-            curl -X DELETE -H "Content-Type: application/json" $URL:globalcomponentcontact-detail:1:1$
-        """
-        pk = self.kwargs.get('pk')
-        contact = get_object_or_404(RoleContact, id=pk)
-
-        gc_id = self.kwargs.get('instance_pk')
-        gc = get_object_or_404(GlobalComponent, id=gc_id)
-
-        old_value = json.dumps(gc.export())
-        if contact in gc.contacts.all():
-            gc.contacts.remove(contact)
-            request.changeset.add("globalcomponent", gc.pk, old_value, json.dumps(gc.export()))
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        else:
-            return Response(
-                data={'detail': 'Can not be deleted since Contact[%s] is not in GlobalComponent[%s].' % (pk, gc_id)},
-                status=status.HTTP_404_NOT_FOUND)
-
-    def create(self, request, *args, **kwargs):
-        """
-        __Method__:
-        POST
-
-        __URL__: $LINK:globalcomponentcontact-list:gc_instance_pk$
-
-        __Data__:
-
-            {
-                'contact_role':                       string,         # required
-                'contact': {
-                    <'username'|'mail_name'>:         string,         # required
-                    'email:                           string,         # required
-                }
-            }
-        __Response__:
-
-            {
-                "url": url,
-                "contact_role": string,
-                "contact": {
-                    <"mail_name"|"username">: string,
-                    "email": string
-                }
-            }
-        """
-        return super(GlobalComponentContactViewSet, self).create(request, *args, **kwargs)
-
-    def get_serializer_context(self):
-        super_class = super(GlobalComponentContactViewSet, self)
-        ret = super_class.get_serializer_context()
-        ret.update({
-            'extra_kwargs': self.kwargs
-        })
-        return ret
 
 
 class GlobalComponentLabelViewSet(viewsets.PDCModelViewSet):
@@ -945,355 +775,6 @@ class ReleaseComponentViewSet(viewsets.PDCModelViewSet):
             curl -X DELETE -H "Content-Type: application/json" $URL:releasecomponent-detail:1$
         """
         return super(ReleaseComponentViewSet, self).destroy(request, *args, **kwargs)
-
-    def bulk_update(self, request, *args, **kwargs):
-        """
-        __Method__:
-        PUT
-
-        __URL__: $LINK:releasecomponent-list$
-
-        __Data__:
-
-            {
-                'releases':                                  array,          # optional
-                'global_component':                          string,         # required
-                'contacts': [
-                    {
-                        'contact_role':                      string,         # required
-                        'contact': {
-                            <'username'|'mail_name'>:        string,         # required
-                            'email:                          string,         # required
-                        }
-                    },
-                    ......
-                ]
-            }
-        __Response__:
-
-            [
-                {
-                    "id": int,
-                    "release": {
-                        "release_id": string,
-                        "active": bool
-                    },
-                    "global_component": string,
-                    "bugzilla_component": string,
-                    "brew_package": string
-                    "name": string,
-                    "dist_git_branch": <string|null>,
-                    "dist_git_web_url": string,
-                    "active": true,
-                    "contacts": [
-                        ......
-                    ],
-                    "srpm": {
-                        "name": string,
-                    } OR null,
-                    "type": <string|null>
-                },
-                ......
-            ]
-        """
-        required_fields = set(("global_component", "contacts"))
-        missing_fields = required_fields - set(request.data.keys())
-        if missing_fields:
-            return Response(status=status.HTTP_400_BAD_REQUEST,
-                            data={'detail': 'Missing arguments: %s' % ', '.join(missing_fields)})
-
-        global_component_name = request.data.get('global_component')
-        releases = request.data.get('releases')
-        contacts = request.data.get('contacts')
-
-        if not global_component_name:
-            return Response({"detail": "global_component is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-        qs = self.get_queryset().filter(global_component__name=global_component_name)
-
-        if releases:
-            release = (releases,) if not isinstance(releases, list) else releases
-            qs = qs.filter(release__release_id__in=release)
-
-        # iterate release component records
-        for row in qs.iterator():
-            context = self.get_serializer_context()
-            context.update({'extra_kwargs': {'instance_pk': row.id}})
-            contact_serializer = HackedContactSerializer(data=contacts,
-                                                         many=True,
-                                                         context=context)
-
-            if not contact_serializer.is_valid():
-                return Response(contact_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-            # contact does not exist in this release component
-            # dump release component before update
-            pre_export = row.export()
-            # iterate new contacts.
-            for obj in contact_serializer.validated_data:
-                if not row.contacts.filter(pk=obj.pk).exists():
-                    overwrite_contact = row.contacts.filter(contact_role_id=obj.contact_role_id)
-                    if overwrite_contact.exists():
-                        # release component has the same contact type contact.
-                        # drop it and insert new one.
-                        overwrite_contact.delete()
-                    # save new contact.
-                    row.contacts.add(obj)
-            request.changeset.add("releasecomponent",
-                                  row.pk,
-                                  json.dumps(pre_export),
-                                  json.dumps(row.export()))
-        serializer = ReleaseComponentSerializer(instance=qs, many=True, context={'request': request})
-        return Response(serializer.data, status=status.HTTP_200_OK)
-
-    def bulk_partial_update(self, request):
-        # Without this definition, bulk_operations would pick up PATCH
-        # requests, convert them to PUT with kwargs['partial'] = True and an
-        # error about potentially missing keys would be returned. This way it
-        # says PATCH is not allowed.
-        return self.http_method_not_allowed(request)
-
-
-class ReleaseComponentContactViewSet(HackedComponentContactMixin,
-                                     viewsets.PDCModelViewSet):
-    """
-    ##Overview##
-
-    This page shows the usage of the **Release Component Contact API**, please
-    see the following for more details.
-
-    ##Test tools##
-
-    You can use ``curl`` in terminal, with -X _method_ (GET|POST|PUT|DELETE),
-    -d _data_ (a json string). or GUI plugins for
-    browsers, such as ``RESTClient``, ``RESTConsole``.
-    """
-    model = ReleaseComponent
-    queryset = ReleaseComponent.objects.all()
-    serializer_class = HackedContactSerializer
-    gcc_serializer_class = HackedContactSerializer
-    extra_query_params = ('contact_role', )
-
-    def get_queryset(self):
-        rc_id = self.kwargs.get("instance_pk", None)
-        try:
-            release_component = get_object_or_404(ReleaseComponent, pk=rc_id)
-        except ValueError:
-            # Raised when non-numeric instance_pk is given.
-            raise Http404('Release component with id=%s not found' % rc_id)
-        return release_component.contacts.all()
-
-    def get_serializer_context(self):
-        super_class = super(ReleaseComponentContactViewSet, self)
-        ret = super_class.get_serializer_context()
-        ret.update({
-            'extra_kwargs': self.kwargs
-        })
-        return ret
-
-    def get_serializer(self, *args, **kwargs):
-        serializer_class = self.get_serializer_class()
-        kwargs['context'] = self.get_serializer_context()
-        kwargs['view_name'] = 'releasecomponentcontact-detail'
-        return serializer_class(*args, **kwargs)
-
-    def list(self, request, *args, **kwargs):
-        """
-        __Method__:
-        GET
-
-        __URL__: $LINK:releasecomponentcontact-list:rc_instance_pk$
-
-        __Query Params__:
-
-        %(FILTERS)s
-
-        __Response__:
-
-            [
-                {
-                    "url": url,
-                    "contact_role": string,
-                    "contact": {
-                        <"mail_name"|"username">: string,
-                        "email": string
-                    }
-                },
-                ......
-            ]
-        """
-        # FIXME: Design issue here. Contact inheritance(PDC-184) requires access
-        # of different resource under same url. e.g., could view global component
-        # contact information under release component contact list.
-        # This is not RESTful. To meet this needs, I have to hard code this
-        # `ViewSet.list`, as I failed to find an elegant way. Unfortunately we
-        # cannot benefit from DRF built-in features such as pagination.
-        rc_id = kwargs.get("instance_pk", None)
-        # Release Component object
-        try:
-            rc = get_object_or_404(ReleaseComponent, pk=rc_id)
-        except ValueError:
-            # Raised when non-numeric instance_pk is given.
-            raise Http404('Release component with id=%s not found' % rc_id)
-        gcc_qs = GlobalComponent.objects.get(pk=rc.global_component_id).contacts.all()
-        rcc_qs = rc.contacts.all()
-        # Contact type based inheritance mechanisms(excerpted from JIRA PDC-184)
-        # - Input without contact_role, output contacts including
-        #   release_component's contacts and global_component's contacts which
-        #   is not in self contacts.
-        # - Input with specific contact_role which is only in global_component
-        #   output contact will inherit from global_component's.
-        # - Input with specific contact_role which is in release_component,
-        #   output contact will be it's own contact
-        rcc_types = map(lambda s: s.contact_role.name, rcc_qs)
-        # excluded_types: existing contact types for release component
-        excluded_types = ContactRole.objects.filter(name__in=rcc_types)
-        # exclude co-exists(same contact type) contacts from global component.
-        gcc_qs = gcc_qs.exclude(contact_role__in=excluded_types)
-
-        query_params = request.query_params
-        contact_role = query_params.getlist('contact_role')
-        # FIXME: add more options in query parameter.
-        # username = query_params.getlist('username')
-        # mail_name = query_params.getlist('mail_name')
-        # email = query_params.getlist('email')
-        if contact_role:
-            c_types = ContactRole.objects.filter(name__in=contact_role)
-            gcc_qs = gcc_qs.filter(contact_role__in=c_types)
-            rcc_qs = rcc_qs.filter(contact_role__in=c_types)
-
-        context = self.get_serializer_context()
-        view_name = 'releasecomponentcontact-detail'
-        serializer = self.serializer_class(rcc_qs, many=True,
-                                           context=context,
-                                           view_name=view_name)
-        ret = serializer.data
-        # FIXME: We need to add identity `inherited=True` for global component
-        # contacts in the resulting release component contacts(PDC-166).
-        # Since the attribute `inherited` only makes sense for release component
-        # contacts, it's not appropriate to hack this `inherited=True` stuff from
-        # within the GlobalComponentContactSerializer.
-        # Below is an ugly hack over GlobalComponentContactSerializer.data.
-        # Note that with this change, the resulting contact representations will
-        # be in-consistent accross global/release component contacts.
-        # We need to access inconsistent resources under a specific URL,
-        # in our case, we need to access release component contacts as well as
-        # global component contact (if any) under the same url.
-        # This is non-semantic URL design [1] and needs a better approach.
-        # [1] http://en.wikipedia.org/wiki/Semantic_URL
-        gcc_serializer = self.gcc_serializer_class(
-            gcc_qs,
-            many=True,
-            inherited=True,
-            # NOTE(xchu): The `HackedContactSerializer` used here need `instance_pk`
-            #             in the context `extra_kwargs` to build the 'url' in response.
-            #             For the inherited contacts, we need to pass
-            #             `global_component_id` as `instance_pk`.
-            context={'request': request,
-                     'extra_kwargs': {'instance_pk': rc.global_component_id}})
-        gc_contacts = gcc_serializer.data
-        ret.extend(gc_contacts)
-
-        return Response(ret)
-
-    def retrieve(self, request, *args, **kwargs):
-        """
-        __Method__:
-        GET
-
-        __URL__: $LINK:releasecomponentcontact-detail:rc_instance_pk:relation_pk$
-
-        __Response__:
-
-            {
-                "url": url,
-                "contact_role": string,
-                "contact": {
-                    <"mail_name"|"username">: string,
-                    "email": string
-                }
-            }
-        """
-        return super(ReleaseComponentContactViewSet, self).retrieve(request, *args, **kwargs)
-
-    def create(self, request, *args, **kwargs):
-        """
-        __Method__:
-        POST
-
-        __URL__: $LINK:releasecomponentcontact-list:rc_instance_pk$
-
-        __Data__:
-
-            {
-                'contact_role':                       string,         # required
-                'contact': {
-                    <'username'|'mail_name'>:         string,         # required
-                    'email:                           string,         # required
-                }
-            }
-        __Response__:
-
-            {
-                "url": url,
-                "contact_role": string,
-                "contact": {
-                    <"mail_name"|"username">: string,
-                    "email": string
-                }
-            }
-        """
-        return super(ReleaseComponentContactViewSet, self).create(request, *args, **kwargs)
-
-    def destroy(self, request, *args, **kwargs):
-        """
-        __Method__:
-        DELETE
-
-        __URL__: $LINK:releasecomponentcontact-detail:rc_instance_pk:relation_pk$
-
-        __Response__:
-
-            STATUS: 204 NO CONTENT
-
-        __Example__:
-
-            curl -X DELETE -H "Content-Type: application/json" $URL:releasecomponentcontact-detail:2:3175$
-        """
-        pk = self.kwargs.get('pk')
-        try:
-            contact = RoleContact.objects.get(id=pk)
-        except RoleContact.DoesNotExist:
-            return Response(data={'detail': 'Specified TypedContact[%s] not found.' % pk},
-                            status=status.HTTP_404_NOT_FOUND)
-
-        rc_id = self.kwargs.get('instance_pk')
-        try:
-            rc = ReleaseComponent.objects.get(id=rc_id)
-        except ReleaseComponent.DoesNotExist:
-            return Response(data={'detail': 'Specified ReleaseComponent[%s] not found.' % rc_id},
-                            status=status.HTTP_404_NOT_FOUND)
-
-        old_value = json.dumps(rc.export())
-        if contact in rc.contacts.all():
-            rc.contacts.remove(contact)
-            request.changeset.add("releasecomponent", rc.pk, old_value, json.dumps(rc.export()))
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        elif contact in rc.global_component.contacts.all():
-            return Response(
-                data={'detail': 'Contact[%s] is inherited from GlobalComponent[%s] and can only be deleted from there.'
-                      % (pk, rc.global_component.pk)},
-                status=status.HTTP_400_BAD_REQUEST)
-        else:
-            return Response(
-                data={'detail': 'Can not be deleted since Contact[%s] is not in ReleaseComponent[%s].' % (pk, rc_id)},
-                status=status.HTTP_404_NOT_FOUND)
-
-    def update(self, request, *args, **kwargs):
-        return self.http_method_not_allowed(request, *args, **kwargs)
-
-    def bulk_update(self, request, *args, **kwargs):
-        return self.http_method_not_allowed(request, *args, **kwargs)
 
 
 class BugzillaComponentViewSet(viewsets.PDCModelViewSet):

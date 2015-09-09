@@ -14,7 +14,7 @@ from django.dispatch import receiver
 from mptt import models as mptt_models
 
 from pdc.apps.common.models import Label
-from pdc.apps.contact.models import RoleContact
+from pdc.apps.contact.models import ContactRole, Contact, RoleContactSpecificManager
 from pdc.apps.common import hacks
 from pdc.apps.release.models import Release
 from pdc.apps.release import signals
@@ -28,6 +28,46 @@ __all__ = [
     'ReleaseComponentGroup',
     'GroupType'
 ]
+
+
+class GCContact(models.Model):
+    contact_role = models.ForeignKey(ContactRole, on_delete=models.PROTECT)
+    contact = models.ForeignKey(Contact, on_delete=models.PROTECT)
+    component = models.ForeignKey('GlobalComponent')
+
+    objects = models.Manager()
+    specific_objects = RoleContactSpecificManager()
+
+    class Meta:
+        unique_together = (('contact_role', 'contact', 'component'))
+
+    def __unicode__(self):
+        return u"%s: %s" % (self.contact_role, unicode(self.contact))
+
+    def export(self, fields=None):
+        result = {'contact': self.contact.export(fields=fields)}
+        result['contact_role'] = self.contact_role.name
+        return result
+
+
+class RCContact(models.Model):
+    contact_role = models.ForeignKey(ContactRole, on_delete=models.PROTECT)
+    contact = models.ForeignKey(Contact, on_delete=models.PROTECT)
+    component = models.ForeignKey('ReleaseComponent')
+
+    objects = models.Manager()
+    specific_objects = RoleContactSpecificManager()
+
+    class Meta:
+        unique_together = (('contact_role', 'contact', 'component'))
+
+    def __unicode__(self):
+        return u"%s: %s" % (self.contact_role, unicode(self.contact))
+
+    def export(self, fields=None):
+        result = {'contact': self.contact.export(fields=fields)}
+        result['contact_role'] = self.contact_role.name
+        return result
 
 
 def validate_bc_name(name):
@@ -106,7 +146,7 @@ class GlobalComponent(models.Model):
     """Record generic component"""
 
     name            = models.CharField(max_length=100, unique=True)
-    contacts        = models.ManyToManyField(RoleContact, blank=True)
+    contacts        = models.ManyToManyField(Contact, through=GCContact)
     dist_git_path   = models.CharField(max_length=200, blank=True, null=True)
     labels          = models.ManyToManyField(Label, blank=True)
     upstream        = models.OneToOneField(Upstream, blank=True, null=True)
@@ -122,16 +162,10 @@ class GlobalComponent(models.Model):
         return settings.DIST_GIT_REPO_FORMAT % (dist_git_path)
 
     def export(self, fields=None):
-        _fields = ['name', 'contacts', 'dist_git_path', 'labels', 'upstream'] if fields is None else fields
+        _fields = ['name', 'dist_git_path', 'labels', 'upstream'] if fields is None else fields
         result = dict()
         if 'name' in _fields:
             result['name'] = self.name
-        if 'contacts' in _fields:
-            result['contacts'] = []
-            contacts = self.contacts.all()
-            if contacts:
-                for contact in contacts:
-                    result['contacts'].append(contact.export())
         if 'dist_git_path' in _fields:
             result['dist_git_path'] = self.dist_git_path
         if 'labels' in _fields:
@@ -157,12 +191,14 @@ class ReleaseComponent(models.Model):
 
     release                     = models.ForeignKey(Release)
     global_component            = models.ForeignKey(GlobalComponent)
-    bugzilla_component          = models.ForeignKey(BugzillaComponent, blank=True, null=True, on_delete=models.SET_NULL)
-    type                        = models.ForeignKey(ReleaseComponentType, default=1, on_delete=models.SET_DEFAULT,
+    bugzilla_component          = models.ForeignKey(BugzillaComponent, blank=True, null=True,
+                                                    on_delete=models.SET_NULL)
+    type                        = models.ForeignKey(ReleaseComponentType, default=1,
+                                                    on_delete=models.SET_DEFAULT,
                                                     related_name='release_components')
     name                        = models.CharField(max_length=100)
     dist_git_branch             = models.CharField(max_length=100, blank=True, null=True)
-    contacts                    = models.ManyToManyField(RoleContact, blank=True)
+    contacts                    = models.ManyToManyField(Contact, through=RCContact)
     brew_package = models.CharField(max_length=100, blank=True, null=True)
     active = models.BooleanField(default=True)
 

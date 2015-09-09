@@ -6,7 +6,7 @@
 #
 from django.contrib import admin
 
-from .models import Maillist, ContactRole, Contact, Person, RoleContact
+from .models import Maillist, ContactRole, Contact, Person
 
 
 class MaillistAdmin(admin.ModelAdmin):
@@ -26,13 +26,7 @@ class ContactRoleAdmin(admin.ModelAdmin):
     search_fields = ['name']
 
 
-class RoleContactAdmin(admin.ModelAdmin):
-    list_display = ('contact_role', 'contact')
-    search_fields = ['contact_role', 'contact']
-
-
 admin.site.register(Maillist, MaillistAdmin)
 admin.site.register(Person, PersonAdmin)
 admin.site.register(ContactRole, ContactRoleAdmin)
 admin.site.register(Contact)
-admin.site.register(RoleContact, RoleContactAdmin)

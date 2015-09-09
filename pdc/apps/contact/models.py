@@ -9,14 +9,6 @@ from django.db import models
 from django.db.models.query import QuerySet
 from django.forms.models import model_to_dict
 
-__all__ = [
-    'Person',
-    'Maillist',
-    'ContactRole',
-    'Contact',
-    'RoleContact',
-]
-
 
 class ContactRole(models.Model):
 
@@ -148,28 +140,3 @@ class RoleContactSpecificManager(models.Manager):
         else:
             raise KeyError("'contact_role' is needed for RoleContactSpecificManager.")
         return self.get_queryset().create(**create_kwargs)
-
-
-class RoleContact(models.Model):
-
-    contact_role = models.ForeignKey(ContactRole, related_name='role_contacts',
-                                     on_delete=models.PROTECT)
-    contact      = models.ForeignKey(Contact, related_name='role_contacts',
-                                     on_delete=models.PROTECT)
-
-    objects = models.Manager()
-    specific_objects = RoleContactSpecificManager()
-
-    def __unicode__(self):
-        return u"%s: %s" % (self.contact_role,
-                            unicode(self.contact))
-
-    class Meta:
-        unique_together = (
-            ("contact", "contact_role"),
-        )
-
-    def export(self, fields=None):
-        result = {'contact': self.contact.export(fields=fields)}
-        result['contact_role'] = self.contact_role.name
-        return result

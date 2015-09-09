@@ -6,12 +6,10 @@
 import json
 
 from django.contrib.contenttypes.models import ContentType
-from django.utils.translation import ugettext_lazy as _
 from rest_framework import serializers
 
 from pdc.apps.common.serializers import DynamicFieldsSerializerMixin, StrictSerializerMixin
-from pdc.apps.common.fields import ChoiceSlugField
-from .models import ContactRole, Person, Maillist, Contact, RoleContact
+from .models import ContactRole, Person, Maillist
 
 
 class ContactRoleSerializer(StrictSerializerMixin,
@@ -78,70 +76,3 @@ class ContactField(serializers.DictField):
                                               json.dumps(contact.export()))
                 return contact
         raise serializers.ValidationError('Could not determine type of contact.')
-
-
-class UniqueRoleContactValidator(object):
-    message = _('The fields {field_names} must make a unique set.')
-
-    def __init__(self):
-        self.query_set = RoleContact.objects.all()
-        self.unique_together = RoleContact._meta.unique_together[0]
-
-    def set_context(self, data):
-        self.instance = data.instance
-
-    def get_contact_role_pk(self, instance):
-        crole_instance = ContactRole.objects.get(name=instance.name)
-        return crole_instance.pk
-
-    def get_contact_pk(self, instance):
-        data = {}
-        leaf_instance = instance.as_leaf_class()
-        query_prefix = ''
-        if isinstance(leaf_instance, Person):
-            query_prefix = 'person__'
-        elif isinstance(leaf_instance, Maillist):
-            query_prefix = 'maillist__'
-        else:
-            raise serializers.ValidationError("Unsupported Contact: %s" % instance)
-        for field in leaf_instance._meta.fields:
-            if field.primary_key:
-                continue
-            data[query_prefix + field.name] = getattr(leaf_instance, field.name)
-        contact = Contact.objects.get(**data)
-        return contact.pk
-
-    def filter_queryset(self, **kwargs):
-        queryset = self.query_set.filter(**kwargs)
-
-        if self.instance is not None:
-            queryset = queryset.exclude(pk=self.instance.pk)
-
-        if queryset.exists():
-            raise serializers.ValidationError(self.message.format(field_names=self.unique_together))
-
-    def __call__(self, value):
-        if self.instance:
-            crole_input = value.get("contact_role", self.instance.contact_role)
-            contact_input = value.get("contact", self.instance.contact)
-        else:
-            crole_input = value.get("contact_role")
-            contact_input = value.get("contact")
-        self.filter_queryset(**{
-            "contact_role_id": self.get_contact_role_pk(crole_input),
-            "contact_id": self.get_contact_pk(contact_input)
-        })
-
-
-class RoleContactSerializer(DynamicFieldsSerializerMixin,
-                            StrictSerializerMixin,
-                            serializers.HyperlinkedModelSerializer):
-    contact_role = ChoiceSlugField(queryset=ContactRole.objects.all(), slug_field='name')
-    contact = ContactField()
-
-    class Meta:
-        model = RoleContact
-        fields = ('id', 'contact_role', 'contact')
-        validators = [
-            UniqueRoleContactValidator()
-        ]

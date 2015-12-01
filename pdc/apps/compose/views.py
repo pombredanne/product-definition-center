@@ -31,20 +31,25 @@ from pdc.apps.common.hacks import bool_from_native, convert_str_to_bool, as_dict
 from pdc.apps.common.viewsets import (ChangeSetCreateModelMixin,
                                       StrictQueryParamMixin,
                                       NoEmptyPatchMixin,
-                                      ChangeSetDestroyModelMixin)
+                                      ChangeSetDestroyModelMixin,
+                                      ChangeSetModelMixin,
+                                      MultiLookupFieldMixin)
 from pdc.apps.release.models import Release
 from .models import (Compose, VariantArch, Variant, ComposeRPM, OverrideRPM,
-                     ComposeImage, ComposeRPMMapping, ComposeAcceptanceTestingState)
+                     ComposeImage, ComposeRPMMapping, ComposeAcceptanceTestingState,
+                     ComposeTree)
 from .forms import (ComposeSearchForm, ComposeRPMSearchForm, ComposeImageSearchForm,
                     ComposeRPMDisableForm, OverrideRPMForm, VariantArchForm, OverrideRPMActionForm)
-from .serializers import ComposeSerializer, OverrideRPMSerializer
-from .filters import ComposeFilter, OverrideRPMFilter
+from .serializers import ComposeSerializer, OverrideRPMSerializer, ComposeTreeSerializer
+from .filters import ComposeFilter, OverrideRPMFilter, ComposeTreeFilter
 from . import lib
 
 
 class ComposeListView(SearchView):
     form_class = ComposeSearchForm
-    queryset = Compose.objects.all()
+    queryset = Compose.objects.all() \
+        .select_related('release', 'compose_type') \
+        .prefetch_related('linked_releases').order_by('id')
     allow_empty = True
     template_name = "compose_list.html"
     context_object_name = "compose_list"
@@ -52,7 +57,10 @@ class ComposeListView(SearchView):
 
 
 class ComposeDetailView(DetailView):
-    model = Compose
+    queryset = Compose.objects.select_related('release', 'compose_type') \
+        .prefetch_related('linked_releases', 'variant_set__variantarch_set',
+                          'variant_set__variantarch_set__arch',
+                          'variant_set__variant_type')
     pk_url_kwarg = "id"
     template_name = "compose_detail.html"
 
@@ -423,7 +431,7 @@ class ComposeViewSet(StrictQueryParamMixin,
     template contains a string `{{package}}` which should be replaced with the
     package name you are interested in.
     """
-    queryset = Compose.objects.all()
+    queryset = Compose.objects.all().order_by('id')
     serializer_class = ComposeSerializer
     filter_class = ComposeFilter
     lookup_field = 'compose_id'
@@ -603,7 +611,7 @@ class ComposeRPMView(StrictQueryParamMixin, viewsets.GenericViewSet):
             {
                 "release_id": string,
                 "composeinfo": composeinfo,
-                "rpm_manifest": image_manifest
+                "rpm_manifest": rpm_manifest
             }
 
         The `composeinfo` and `rpm_manifest` values should be actual JSON
@@ -711,8 +719,9 @@ class ComposeRPMMappingView(StrictQueryParamMixin,
         """
         __URL__: $LINK:composerpmmapping-detail:compose_id:package$
 
-        Allows to create and destroy overrides. The request should send JSON data
-        in following format:
+        Unlike other API end-points, patching RPM mapping requires you to specify all the fields. The request data
+        should be a list of objects where each object has exactly the keys listed in documentation below. Only `include`
+        field can be left out if `action` is not `create`.
 
             [
                 {
@@ -871,7 +880,7 @@ class ReleaseOverridesRPMViewSet(StrictQueryParamMixin,
     """
 
     serializer_class = OverrideRPMSerializer
-    queryset = OverrideRPM.objects.all()
+    queryset = OverrideRPM.objects.all().order_by('id')
     filter_class = OverrideRPMFilter
 
     def create(self, *args, **kwargs):
@@ -1355,41 +1364,140 @@ class FindComposeByProductVersionRPMViewSet(StrictQueryParamMixin, FindComposeMi
         return Response(self._get_composes_for_product_version())
 
 
-class FindComposeWithOlderPackageViewSet(StrictQueryParamMixin, FindComposeMixin,
-                                         viewsets.ReadOnlyModelViewSet):
+class ComposeTreeViewSet(ChangeSetModelMixin,
+                         StrictQueryParamMixin,
+                         MultiLookupFieldMixin,
+                         viewsets.GenericViewSet):
     """
-    This API endpoint allows finding composes with different version of a
-    package. The other use-case that it serves gives for a release a list of
-    composes with versions of included packages.
+    API endpoint that allows querying compose-variant-arch relevant to location.
+
+    ##Test tools##
+
+    You can use ``curl`` in terminal, with -X _method_ (GET|POST|PUT|DELETE),
+    -d _data_ (a json string). or GUI plugins for
+    browsers, such as ``RESTClient``, ``RESTConsole``.
     """
-    queryset = ComposeRPM.objects.none()    # Required for permissions
-    extra_query_params = ('release', 'compose', 'rpm_name', 'to_dict', 'product_version', 'included_compose_type',
-                          'excluded_compose_type', 'latest')
+    queryset = ComposeTree.objects.select_related('compose', 'variant', 'arch').all()
+    serializer_class = ComposeTreeSerializer
+    filter_class = ComposeTreeFilter
+    lookup_fields = (
+        ('compose__compose_id', r'[^/]+'),
+        ('variant__variant_uid', r'[^/]+'),
+        ('arch__name', r'[^/]+'),
+        ('location__short', r'[^/]+'),
+    )
 
-    def list(self, request):
+    def list(self, *args, **kwargs):
         """
-        This endpoint is deprecated. Please use instead:
-        $LINK:findcomposebyrr-list:release_id:rpm_name$,
-        $LINK:findoldercomposebycr-list:compose_id:rpm_name$,
-        $LINK:findcomposesbypvr-list:product_version:rpm_name$
-        """
-        self.rpm_name = request.query_params.get('rpm_name')
-        self.release_id = request.query_params.get('release')
-        self.compose_id = request.query_params.get('compose')
-        self.product_version = request.query_params.get('product_version')
-        self.included_compose_type = request.query_params.get('included_compose_type')
-        self.excluded_compose_type = request.query_params.get('excluded_compose_type')
-        self._get_query_param_or_false(request, 'to_dict')
-        self._get_query_param_or_false(request, 'latest')
+        __Method__: GET
 
-        if not self.rpm_name:
+        __URL__: $LINK:composetreelocations-list$
+
+        __Query params__:
+
+        %(FILTERS)s
+
+        __Response__: a paged list of following objects
+
+        %(SERIALIZER)s
+        """
+        return super(ComposeTreeViewSet, self).list(*args, **kwargs)
+
+    def create(self, request, *args, **kwargs):
+        """
+        __Method__: POST
+
+        __URL__: $LINK:composetreelocations-list$
+
+        __Data__:
+
+        %(WRITABLE_SERIALIZER)s
+
+         * *synced_content*: $LINK:contentdeliverycontentcategory-list$
+
+        __Response__: Same as input data.
+
+        __NOTE__:
+        If synced_content is omitted, all content types are filled in.
+        """
+        if not request.data.get("synced_content"):
+            request.data["synced_content"] = ['binary', 'debug', 'source']
+        return super(ComposeTreeViewSet, self).create(request, *args, **kwargs)
+
+    def retrieve(self, *args, **kwargs):
+        """
+        __Method__: GET
+
+        __URL__: $LINK:composetreelocations-detail:compose_id}/{variant_uid}/{arch}/{location$
+
+        __Response__:
+
+        %(SERIALIZER)s
+        """
+        return super(ComposeTreeViewSet, self).retrieve(*args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        # This method is used by bulk update and partial update, but should not
+        # be called directly.
+        if not kwargs.get('partial', False):
+            return self.http_method_not_allowed(request, *args, **kwargs)
+
+        if not request.data:
+            return NoEmptyPatchMixin.make_response()
+
+        updatable_keys = set(['scheme', 'url', 'synced_content'])
+        if set(request.data.keys()) - updatable_keys:
             return Response(status=status.HTTP_400_BAD_REQUEST,
-                            data={'detail': 'The rpm_name is required.'})
-        if self.release_id:
-            return Response(self._get_composes_for_release())
-        if self.compose_id:
-            return Response(self._get_older_compose())
-        if self.product_version:
-            return Response(self._get_composes_for_product_version())
-        return Response(status=status.HTTP_400_BAD_REQUEST,
-                        data={'detail': 'One of product_version, release or compose argument is required.'})
+                            data={'detail': 'Only these properties can be updated: %s'
+                                  % ', '.join(updatable_keys)})
+
+        return super(ComposeTreeViewSet, self).update(request, *args, **kwargs)
+
+    def bulk_update(self, *args, **kwargs):
+        """
+        It is possible to perform bulk partial update on composetreelocation with `PATCH`
+        method. The input must be a JSON object with composetreelocation identifiers as
+        keys. Values for these keys should be in the same format as when
+        updating a single composetreelocation.
+        """
+        return bulk_operations.bulk_update_impl(self, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        """
+        Only some composetreelocation fields can be modified by this call. They are
+        `scheme`, `synced_content` and `url`. Trying to change anything else
+        will result in 400 BAD REQUEST response.
+
+        __Method__: PATCH
+
+        __URL__: $LINK:composetreelocations-detail:compose_id}/{variant_uid}/{arch}/{location$
+
+        __Data__:
+
+            {
+                "scheme": string,
+                "synced_content": [string],
+                "url": string
+            }
+
+        If the same content category is specified in `synced_content` multiple times, it
+        will be saved only once.
+
+        __Response__:
+        same as for retrieve
+        """
+        kwargs['partial'] = True
+        return self.update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        __Method__:
+        DELETE
+
+        __URL__: $LINK:composetreelocations-detail:compose_id}/{variant_uid}/{arch}/{location$
+
+        __Response__:
+
+            STATUS: 204 NO CONTENT
+        """
+        return super(ComposeTreeViewSet, self).destroy(request, *args, **kwargs)

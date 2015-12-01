@@ -435,6 +435,52 @@ class ProductVersionUpdateRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertEqual(pv.product.name, 'Test')
 
 
+class ActiveCountTestCase(APITestCase):
+    fixtures = ["pdc/apps/release/fixtures/tests/active-filter.json"]
+
+    def test_active_for_product_version_with_mixed(self):
+        pv = models.ProductVersion.objects.get(pk=3)
+        self.assertTrue(pv.active)
+        self.assertEqual(pv.release_count, 2)
+        self.assertEqual(pv.active_release_count, 1)
+
+    def test_active_for_product_version_with_active_only(self):
+        pv = models.ProductVersion.objects.get(pk=2)
+        self.assertTrue(pv.active)
+        self.assertEqual(pv.release_count, 1)
+        self.assertEqual(pv.active_release_count, 1)
+
+    def test_active_for_product_version_with_inactive_only(self):
+        pv = models.ProductVersion.objects.get(pk=4)
+        self.assertFalse(pv.active)
+        self.assertEqual(pv.release_count, 1)
+        self.assertEqual(pv.active_release_count, 0)
+
+    def test_active_for_product_with_mixed(self):
+        p = models.Product.objects.get(pk=2)
+        self.assertTrue(p.active)
+        self.assertEqual(p.product_version_count, 3)
+        self.assertEqual(p.active_product_version_count, 2)
+        self.assertEqual(p.release_count, 4)
+        self.assertEqual(p.active_release_count, 2)
+
+    def test_active_for_product_with_active_only(self):
+        p = models.Product.objects.get(pk=1)
+        self.assertTrue(p.active)
+        self.assertEqual(p.product_version_count, 1)
+        self.assertEqual(p.active_product_version_count, 1)
+        self.assertEqual(p.release_count, 1)
+        self.assertEqual(p.active_release_count, 1)
+
+    def test_active_for_product_with_inactive_only(self):
+        p = models.Product.objects.get(pk=3)
+        self.assertFalse(p.active)
+        self.assertEqual(p.product_version_count, 1)
+        self.assertEqual(p.active_product_version_count, 0)
+        self.assertEqual(p.release_count, 1)
+        self.assertEqual(p.active_release_count, 0)
+
+
 class ActiveFilterTestCase(APITestCase):
     fixtures = ["pdc/apps/release/fixtures/tests/active-filter.json"]
 
@@ -996,6 +1042,40 @@ class ReleaseUpdateRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertIsNone(models.Release.objects.get(release_id='release-1.0').dist_git_branch)
         self.assertNumChanges([1])
 
+    def test_update_can_reset_base_product(self):
+        self.release.base_product = models.BaseProduct.objects.create(
+            name='Base Product',
+            short='bp',
+            version='1'
+        )
+        self.release.save()
+
+        response = self.client.patch(reverse('release-detail', args=['release-1.0-bp-1']),
+                                     {'base_product': None}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        # The dist-git mapping mentioned in changelog because release_id changes.
+        self.assertNumChanges([2])
+        self.assertIsNone(response.data['base_product'])
+        release = models.Release.objects.get(release_id='release-1.0')
+        self.assertIsNone(release.base_product)
+
+    def test_update_can_reset_product_version(self):
+        self.release.product_version = models.ProductVersion.objects.create(
+            name='Base Product',
+            short='p',
+            version='1',
+            product=models.Product.objects.create(name='Product', short='p')
+        )
+        self.release.save()
+
+        response = self.client.patch(reverse('release-detail', args=['release-1.0']),
+                                     {'product_version': None}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNumChanges([1])
+        self.assertIsNone(response.data['product_version'])
+        release = models.Release.objects.get(release_id='release-1.0')
+        self.assertIsNone(release.product_version)
+
     def test_update_can_explicitly_erase_optional_field_via_patch(self):
         response = self.client.patch(self.url, {'dist_git': None}, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -1275,7 +1355,7 @@ class ReleaseImportTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertItemsEqual(release.trees,
                               ['Client.x86_64', 'Server.x86_64', 'Server.s390x',
                                'Server.ppc64', 'Server-SAP.x86_64'])
-        self.assertEqual(release.variant_set.get(variant_uid='Server-SAP').integrated_from.release.release_id,
+        self.assertEqual(release.variant_set.get(variant_uid='Server-SAP').integrated_from.release_id,
                          'sap-1.0-tp-1')
 
         response = self.client.get(reverse('product-detail', args=['sap']))
@@ -1294,7 +1374,7 @@ class ReleaseImportTestCase(TestCaseWithChangeSetMixin, APITestCase):
                               'active': True, 'release_type': 'ga', 'dist_git': None})
         release = models.Release.objects.get(release_id='sap-1.0-tp-1')
         self.assertItemsEqual(release.trees, ['Server-SAP.x86_64'])
-        self.assertEqual(release.variant_set.get(variant_uid='Server-SAP').integrated_to.release.release_id,
+        self.assertEqual(release.variant_set.get(variant_uid='Server-SAP').integrated_to.release_id,
                          'tp-1.0')
 
     def test_import_via_get(self):
@@ -1306,6 +1386,22 @@ class ReleaseImportTestCase(TestCaseWithChangeSetMixin, APITestCase):
         data = {'garbage': 'really'}
         response = self.client.post(reverse('releaseimportcomposeinfo-list'), data, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_import_incorrect_layered_product_version_mismatch(self):
+        with open('pdc/apps/release/fixtures/tests/composeinfo.json', 'r') as f:
+            data = json.loads(f.read())
+        # Import version 1.0
+        response = self.client.post(reverse('releaseimportcomposeinfo-list'), data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        # Bump release version and import again. Note that layered product
+        # version remained the same.
+        data['payload']['product']['version'] = '1.1'
+
+        response = self.client.post(reverse('releaseimportcomposeinfo-list'), data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('version mismatch', response.content)
+        self.assertIn('sap-1.0-tp-1', response.content)
 
 
 class ReleaseTypeTestCase(TestCaseWithChangeSetMixin, APITestCase):

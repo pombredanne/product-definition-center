@@ -7,7 +7,9 @@
 import json
 
 from django.shortcuts import render, redirect
-from django.contrib.auth import REDIRECT_FIELD_NAME, get_user_model
+from django.contrib.auth import (REDIRECT_FIELD_NAME, get_user_model,
+                                 load_backend)
+from django.contrib.auth import logout as auth_logout
 from django.contrib.auth.models import Group, Permission
 from django.http import HttpResponseRedirect, HttpResponse
 from django.conf import settings
@@ -26,7 +28,7 @@ from pdc.apps.common.viewsets import StrictQueryParamMixin, ChangeSetUpdateModel
 from pdc.apps.utils.utils import group_obj_export
 
 
-def krb5login(request):
+def remoteuserlogin(request):
     # if REDIRECT_FIELD_NAME is present in request.GET and has blank
     # value, that can cause redirect loop while redirecting to it
     redirect_to = request.GET.get(REDIRECT_FIELD_NAME, '/').strip() or '/'
@@ -40,12 +42,32 @@ def krb5login(request):
         pass
 
     if request.user.is_anonymous():
-        reason = "Failed to authenticate with Kerberos. Make sure your browser is correctly configured."
+        reason = "Failed to authenticate. Make sure your browser is correctly configured."
     elif not request.user.is_active:
         reason = "Account is not active."
 
     context = {'reason': reason}
-    return render(request, 'no_krb5.html', context)
+    return render(request, 'auth_error.html', context)
+
+
+def logout(request):
+    # if REDIRECT_FIELD_NAME is present in request.GET and has blank
+    # value, that can cause redirect loop while redirecting to it
+    redirect_to = request.GET.get(REDIRECT_FIELD_NAME, '/').strip() or '/'
+
+    if not request.user.is_authenticated():
+        return HttpResponseRedirect(redirect_to)
+
+    backend = None
+    if 'auth_backend' in request.session:
+        backend = load_backend(request.session['auth_backend'])
+
+    auth_logout(request)
+
+    if backend:
+        redirect_to = getattr(backend, 'logout_url', '') + redirect_to
+
+    return HttpResponseRedirect(redirect_to)
 
 
 def user_profile(request):
@@ -59,7 +81,7 @@ def refresh_ldap_groups(request):
     if request.is_ajax():
         return HttpResponse(json.dumps({
             'username': user.username,
-            'fullname': user.first_name + ' ' + user.last_name,
+            'fullname': user.full_name,
             'e-mail': user.email,
             'is_superuser': user.is_superuser,
             'is_staff': user.is_staff,
@@ -94,7 +116,7 @@ class TokenViewSet(StrictQueryParamMixin, viewsets.ViewSet):
 
     * obtain token
 
-            curl --negotiate -u : -H "Content-Type: application/json"  $URL:token-obtain$
+            curl --negotiate -u : -H "Accept: application/json"  $URL:token-obtain$
 
         you will get a `Response` like:
 
@@ -110,7 +132,7 @@ class TokenViewSet(StrictQueryParamMixin, viewsets.ViewSet):
 
     * in case you want refresh your token, you can do it with:
 
-            curl --negotiate -u : -H "Content-Type: application/json"  $URL:token-refresh$
+            curl --negotiate -u : -H "Accept: application/json"  $URL:token-refresh$
 
         you will get a `Response` with refreshed token:
 
@@ -135,7 +157,7 @@ class TokenViewSet(StrictQueryParamMixin, viewsets.ViewSet):
 
         Run:
 
-            curl --negotiate -u : -H "Content-Type: application/json"  $URL:token-obtain$
+            curl --negotiate -u : -H "Accept: application/json"  $URL:token-obtain$
 
         you will get a `Response` like:
 
@@ -164,9 +186,9 @@ class TokenViewSet(StrictQueryParamMixin, viewsets.ViewSet):
 
         Run:
 
-            curl --negotiate -u : -H "Content-Type: application/json"  $URL:token-refresh$
+            curl --negotiate -u : -H "Accept: application/json"  $URL:token-refresh$
             # or
-            curl --negotiate -u : -X PUT -H "Content-Type: application/json"  $URL:token-refresh$
+            curl --negotiate -u : -X PUT -H "Accept: application/json"  $URL:token-refresh$
 
         you will get a `Response` with refreshed token:
 
@@ -220,7 +242,7 @@ class PermissionViewSet(StrictQueryParamMixin,
 
         __Example__:
 
-            curl -H "Content-Type: application/json"  -X GET $URL:permission-list$
+            curl -H "Accept: application/json"  -X GET $URL:permission-list$
             # output
             {
                 "count": 150,
@@ -238,7 +260,7 @@ class PermissionViewSet(StrictQueryParamMixin,
 
         With query params:
 
-            curl -H "Content-Type: application/json"  -G $URL:permission-list$ --data-urlencode "codename=add_logentry"
+            curl -H "Accept: application/json"  -G $URL:permission-list$ --data-urlencode "codename=add_logentry"
             # output
             {
                 "count": 1,
@@ -256,7 +278,7 @@ class PermissionViewSet(StrictQueryParamMixin,
         """
         return super(PermissionViewSet, self).list(request, *args, **kwargs)
 
-    queryset = Permission.objects.all()
+    queryset = Permission.objects.all().order_by("id")
     serializer_class = serializers.PermissionSerializer
     filter_class = filters.PermissionFilter
 
@@ -458,7 +480,7 @@ class GroupViewSet(ChangeSetUpdateModelMixin,
         """
         return super(GroupViewSet, self).update(request, *args, **kwargs)
 
-    queryset = Group.objects.all()
+    queryset = Group.objects.all().order_by('id')
     serializer_class = serializers.GroupSerializer
     filter_class = filters.GroupFilter
     Group.export = group_obj_export
@@ -498,10 +520,10 @@ class CurrentUserViewSet(mixins.ListModelMixin,
                             data={'detail': 'Access denied to unauthorized users.'})
         return Response(data={
             'username': user.username,
-            'fullname': user.get_full_name(),
+            'fullname': user.full_name,
             'e-mail': user.email,
             'is_superuser': user.is_superuser,
             'is_staff': user.is_staff,
             'groups': [g.name for g in user.groups.all()],
-            'permissions': list(user.get_all_permissions()),
+            'permissions': sorted(list(user.get_all_permissions())),
         })

@@ -25,6 +25,11 @@ class PersonViewSet(viewsets.PDCModelViewSet):
     You can use ``curl`` in terminal, with -X _method_ (GET|POST|PUT|PATCH|DELETE),
     -d _data_ (a json string). or GUI plugins for
     browsers, such as ``RESTClient``, ``RESTConsole``.
+
+    Please access this endpoint by
+    [%(HOST_NAME)s/%(API_PATH)s/contacts/people/](/%(API_PATH)s/contacts/people/).
+    Endpoint
+    [%(HOST_NAME)s/%(API_PATH)s/persons/](/%(API_PATH)s/persons/) is deprecated.
     """
 
     def create(self, request, *args, **kwargs):
@@ -144,7 +149,7 @@ class PersonViewSet(viewsets.PDCModelViewSet):
         return super(PersonViewSet, self).destroy(request, *args, **kwargs)
 
     serializer_class = PersonSerializer
-    queryset = Person.objects.all()
+    queryset = Person.objects.all().order_by('id')
     filter_class = PersonFilterSet
 
 
@@ -152,7 +157,7 @@ class MaillistViewSet(viewsets.PDCModelViewSet):
     """
     ##Overview##
 
-    This page shows the usage of the **Maillist API**, please see the
+    This page shows the usage of the **Mailing list API**, please see the
     following for more details.
 
     ##Test tools##
@@ -160,6 +165,11 @@ class MaillistViewSet(viewsets.PDCModelViewSet):
     You can use ``curl`` in terminal, with -X _method_ (GET|POST|PUT|PATCH|DELETE),
     -d _data_ (a json string). or GUI plugins for
     browsers, such as ``RESTClient``, ``RESTConsole``.
+
+    Please access this endpoint by
+    [%(HOST_NAME)s/%(API_PATH)s/contacts/mailing-lists/](/%(API_PATH)s/contacts/mailing-lists/).
+    Endpoint
+    [%(HOST_NAME)s/%(API_PATH)s/maillists/](/%(API_PATH)s/maillists/) is deprecated.
     """
 
     def create(self, request, *args, **kwargs):
@@ -307,7 +317,7 @@ class MaillistViewSet(viewsets.PDCModelViewSet):
         return super(MaillistViewSet, self).destroy(request, *args, **kwargs)
 
     serializer_class = MaillistSerializer
-    queryset = Maillist.objects.all()
+    queryset = Maillist.objects.all().order_by('id')
     filter_class = MaillistFilterSet
 
 
@@ -346,7 +356,7 @@ class ContactRoleViewSet(viewsets.PDCModelViewSet):
 
             curl -H "Content-Type: application/json"  -X POST -d '{"name": "test"}' $URL:contactrole-list$
             # output
-            {"name": "test"}
+            {"name": "test", "count_limit": 1}
         """
         return super(ContactRoleViewSet, self).create(request, *args, **kwargs)
 
@@ -378,9 +388,11 @@ class ContactRoleViewSet(viewsets.PDCModelViewSet):
                 "results": [
                     {
                         "name": "qe_leader",
+                        "count_limit": 1
                     },
                     {
                         "name": "qe_group",
+                        "count_limit": 1
                     },
                     ...
                 ]
@@ -397,6 +409,7 @@ class ContactRoleViewSet(viewsets.PDCModelViewSet):
                 "results": [
                     {
                         "name": "test",
+                        "count_limit": 1
                     }
                 ]
             }
@@ -420,7 +433,7 @@ class ContactRoleViewSet(viewsets.PDCModelViewSet):
 
             curl -H "Content-Type: application/json" $URL:contactrole-detail:QE_Leader$
             # output
-            {"name": "QE_Leader"}
+            {"name": "QE_Leader", "count_limit": 1}
         """
         return super(ContactRoleViewSet, self).retrieve(request, *args, **kwargs)
 
@@ -446,13 +459,13 @@ class ContactRoleViewSet(viewsets.PDCModelViewSet):
 
             curl -X PUT -d '{"name": "new_name"}' -H "Content-Type: application/json" $URL:contactrole-detail:QE_Ack$
             # output
-            {"name": "new_name"}
+            {"name": "new_name", "count_limit": 1}
 
         PATCH:
 
-            curl -X PATCH -d '{"name": "new_name"}' -H "Content-Type: application/json" $URL:contactrole-detail:QE_Ack$
+            curl -X PATCH -d '{"count_limit": "unlimited"}' -H "Content-Type: application/json" $URL:contactrole-detail:QE_Ack$
             # output
-            {"name": "new_name"}
+            {"name": "new_name", "count_limit": "unlimited"}
         """
         return super(ContactRoleViewSet, self).update(request, *args, **kwargs)
 
@@ -476,7 +489,7 @@ class ContactRoleViewSet(viewsets.PDCModelViewSet):
         return super(ContactRoleViewSet, self).destroy(request, *args, **kwargs)
 
     serializer_class = ContactRoleSerializer
-    queryset = ContactRole.objects.all()
+    queryset = ContactRole.objects.all().order_by('id')
     filter_class = ContactRoleFilterSet
     lookup_field = 'name'
     overwrite_lookup_field = False
@@ -734,11 +747,11 @@ class RoleContactViewSet(viewsets.PDCModelViewSet):
         return super(RoleContactViewSet, self).destroy(request, *args, **kwargs)
 
     serializer_class = RoleContactSerializer
-    queryset = RoleContact.objects.all()
+    queryset = RoleContact.objects.all().order_by('id')
     extra_query_params = ('contact_role', 'username', 'mail_name', 'email')
 
     def get_queryset(self):
-        queryset = RoleContact.objects.all()
+        queryset = RoleContact.objects.all().order_by('id')
 
         filters = self.request.query_params
         person_kwarg = {}

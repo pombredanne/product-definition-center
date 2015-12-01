@@ -18,16 +18,7 @@ from pdc.apps.contact.models import RoleContact
 from pdc.apps.common import hacks
 from pdc.apps.release.models import Release
 from pdc.apps.release import signals
-
-
-__all__ = [
-    'Upstream',
-    'GlobalComponent',
-    'ReleaseComponent',
-    'BugzillaComponent',
-    'ReleaseComponentGroup',
-    'GroupType'
-]
+from .signals import releasecomponent_clone
 
 
 def validate_bc_name(name):
@@ -147,6 +138,7 @@ class GlobalComponent(models.Model):
 
 class ReleaseComponentType(models.Model):
     name = models.CharField(max_length=100, unique=True)
+    has_osbs = models.BooleanField(default=False)
 
     def __unicode__(self):
         return u"%s" % self.name
@@ -337,18 +329,21 @@ def clone_release_components_and_groups(sender, request, original_release, relea
 
     rc_map = dict()
     for rc in ReleaseComponent.objects.filter(release=original_release):
-        org_rc_pk = rc.pk
-        contacts = rc.contacts.all()
-        rc.pk = None
         if not include_inactive and not rc.active:
             continue
+        org_rc_pk = rc.pk
+        rc.pk = None
         rc.release = release
         if new_dist_git_branch:
             rc.dist_git_branch = new_dist_git_branch
         rc.save()
-        rc.contacts.add(*list(contacts))
-        request.changeset.add("ReleaseComponent", rc.pk, "null", json.dumps(rc.export()))
+        request.changeset.add('releasecomponent', rc.pk, 'null', json.dumps(rc.export()))
         rc_map[org_rc_pk] = rc
+
+        releasecomponent_clone.send(sender=rc.__class__,
+                                    request=request,
+                                    orig_component_pk=org_rc_pk,
+                                    component=rc)
 
     for group in ReleaseComponentGroup.objects.filter(release=original_release):
         group_type = group.group_type

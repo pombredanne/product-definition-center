@@ -144,6 +144,8 @@ class ReadOnlyBrowsableAPIRenderer(BrowsableAPIRenderer):
                 macros['SERIALIZER'] = get_serializer(view, include_read_only=True)
             if '%(WRITABLE_SERIALIZER)s' in docstring:
                 macros['WRITABLE_SERIALIZER'] = get_serializer(view, include_read_only=False)
+            if hasattr(view, 'docstring_macros'):
+                macros.update(view.docstring_macros)
         string = formatting.dedent(docstring)
         formatted = string % macros
         formatted = self.substitute_urls(view, method, formatted)
@@ -177,6 +179,7 @@ FILTER_DEFS = {
     'CharFilter': 'string',
     'NullableCharFilter': 'string | null',
     'BooleanFilter': 'bool',
+    'CaseInsensitiveBooleanFilter': 'bool',
     'ActiveReleasesFilter': 'bool',
     'MultiIntFilter': 'int',
 }
@@ -225,6 +228,7 @@ def get_filters(view):
 SERIALIZERS_CACHE = {}
 SERIALIZER_DEFS = {
     'BooleanField': 'boolean',
+    'NullBooleanField': 'boolean',
     'CharField': 'string',
     'IntegerField': 'int',
     'HyperlinkedIdentityField': 'url',
@@ -286,6 +290,8 @@ def get_field_type(serializer, field_name, field, include_read_only):
         if method:
             docstring = getattr(method, '__doc__')
             return _get_type_from_str(docstring, docstring or 'method')
+    elif not include_read_only and hasattr(field, 'writable_doc_format'):
+        return _get_type_from_str(field.writable_doc_format)
     elif hasattr(field, 'doc_format'):
         return _get_type_from_str(field.doc_format)
     elif isinstance(field, serializers.BaseSerializer):
@@ -301,7 +307,9 @@ def get_default_value(serializer, field_name, field):
     """
     value = field.default
     if hasattr(value, 'doc_format'):
-        return "'%s'" % value.doc_format
+        return (value.doc_format
+                if isinstance(value.doc_format, basestring)
+                else str(value.doc_format))
     if value == fields.empty:
         # Try to get default from model field.
         try:
@@ -309,11 +317,6 @@ def get_default_value(serializer, field_name, field):
             return default if default != NOT_PROVIDED else None
         except (FieldDoesNotExist, AttributeError):
             return None
-    if isinstance(value, basestring):
-        # It's a string, wrap it with quotes.
-        return "'%s'" % value
-    if value is None:
-        return "null"
     return value
 
 
@@ -334,7 +337,7 @@ def describe_serializer(serializer, include_read_only):
                     continue
             elif not field.required:
                 notes.append('optional')
-                default = get_default_value(serializer, field_name, field)
+                default = json.dumps(get_default_value(serializer, field_name, field))
                 if not (default is None and field.allow_null):
                     notes.append('default=%s' % default)
             if field.allow_null:

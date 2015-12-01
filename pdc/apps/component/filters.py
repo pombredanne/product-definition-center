@@ -21,7 +21,9 @@ from .models import (GlobalComponent,
 from pdc.apps.contact.models import (Person,
                                      Maillist,
                                      ContactRole,
-                                     RoleContact)
+                                     RoleContact,
+                                     GlobalComponentContact,
+                                     ReleaseComponentContact)
 from pdc.apps.common.filters import (ComposeFilterSet,
                                      value_is_not_empty,
                                      MultiValueFilter,
@@ -149,6 +151,13 @@ class ReleaseComponentFilter(ComposeFilterSet):
     brew_package = MultiValueFilter()
     active = CaseInsensitiveBooleanFilter()
     type = CharFilter(name='type__name')
+    dist_git_branch = MethodFilter(action='filter_by_dist_git_branch', widget=SelectMultiple)
+
+    @value_is_not_empty
+    def filter_by_dist_git_branch(self, qs, value):
+        q = Q(dist_git_branch__in=value) | Q(release__releasedistgitmapping__dist_git_branch__in=value,
+                                             dist_git_branch__isnull=True)
+        return qs.filter(q)
 
     @value_is_not_empty
     def filter_together(self, qs, value):
@@ -257,7 +266,7 @@ class ReleaseComponentFilter(ComposeFilterSet):
     class Meta:
         model = ReleaseComponent
         fields = ('name', 'release', 'email', 'contact_role', 'global_component', 'active',
-                  'bugzilla_component', 'type')
+                  'bugzilla_component', 'type', 'dist_git_branch')
 
 
 class BugzillaComponentFilter(ComposeFilterSet):
@@ -298,3 +307,47 @@ class ReleaseComponentRelationshipFilter(ComposeFilterSet):
         model = ReleaseComponentRelationship
         fields = ('type', 'from_component_release', 'from_component_name', 'to_component_release',
                   'to_component_name')
+
+
+def _filter_contacts(people_filter, maillist_filter, qs, values):
+    """Helper for filtering based on subclassed contacts.
+
+    Runs the filter on separately on each subclass (field defined by argument,
+    the same values are used), then filters the queryset to only keep items
+    that have matching.
+    """
+    people = Person.objects.filter(**{people_filter + '__in': values})
+    mailing_lists = Maillist.objects.filter(**{maillist_filter + '__in': values})
+    return qs.filter(Q(contact__in=people) | Q(contact__in=mailing_lists))
+
+
+class _BaseComponentContactFilter(FilterSet):
+    contact = MethodFilter(action='filter_by_contact', widget=SelectMultiple)
+    email = MethodFilter(action='filter_by_email', widget=SelectMultiple)
+    role = MultiValueFilter(name='role__name')
+    component = MultiValueFilter(name='component__name')
+
+    @value_is_not_empty
+    def filter_by_contact(self, qs, value):
+        return _filter_contacts('username', 'mail_name', qs, value)
+
+    @value_is_not_empty
+    def filter_by_email(self, qs, value):
+        return _filter_contacts('email', 'email', qs, value)
+
+
+class GlobalComponentContactFilter(_BaseComponentContactFilter):
+    class Meta:
+        model = GlobalComponentContact
+        fields = ('role', 'email', 'contact', 'component')
+
+
+class ReleaseComponentContactFilter(_BaseComponentContactFilter):
+    dist_git_branch = MultiValueFilter(name='component__dist_git_branch')
+    release = MultiValueFilter(name='component__release__release_id')
+    global_component = MultiValueFilter(name='component__global_component__name')
+
+    class Meta:
+        model = ReleaseComponentContact
+        fields = ('role', 'email', 'contact', 'component', 'dist_git_branch', 'release',
+                  'global_component')

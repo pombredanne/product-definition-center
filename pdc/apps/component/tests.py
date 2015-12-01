@@ -11,7 +11,12 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from pdc.apps.common.test_utils import TestCaseWithChangeSetMixin
-from pdc.apps.contact.models import Person, Maillist, RoleContact, ContactRole
+from pdc.apps.contact.models import (Person,
+                                     Maillist,
+                                     RoleContact,
+                                     ContactRole,
+                                     GlobalComponentContact,
+                                     ReleaseComponentContact)
 from pdc.apps.release.models import Release, ProductVersion
 from . import models
 
@@ -223,8 +228,8 @@ class GlobalComponentRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         response = self.client.get(url, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 2)
-        self.assertEqual(response.data['results'][0]['name'], 'MySQL-python')
-        self.assertEqual(response.data['results'][1]['name'], 'python')
+        self.assertEqual(response.data['results'][0]['name'], 'python')
+        self.assertEqual(response.data['results'][1]['name'], 'MySQL-python')
 
     def test_query_global_components_with_upstream(self):
         url = reverse('globalcomponent-list')
@@ -711,6 +716,7 @@ class ReleaseComponentRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         pyth = models.BugzillaComponent.objects.create(name='python', parent_component=bugzilla_component)
         models.BugzillaComponent.objects.create(name='bin', parent_component=pyth)
         rc_bz.bugzilla_component = bugzilla_component
+        rc_bz.dist_git_branch = 'test_branch'
         rc_bz.save()
 
     def test_list_active_release_component(self):
@@ -823,12 +829,37 @@ class ReleaseComponentRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 0)
 
+    def test_filter_release_component_by_release_dist_git_branch(self):
+        url = reverse('releasecomponent-list')
+        response = self.client.get(url + '?dist_git_branch=release_branch', format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['name'], 'MySQL-python')
+
+    def test_filter_release_component_by_override_dist_git_branch(self):
+        url = reverse('releasecomponent-list')
+        response = self.client.get(url + '?dist_git_branch=test_branch', format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['name'], 'python27')
+
+    def test_filter_release_component_by_override_same_dist_git_branch(self):
+        url = reverse('releasecomponent-detail', kwargs={'pk': 1})
+        data = {'dist_git_branch': 'release_branch'}
+        self.client.patch(url, data, format='json')
+        url = reverse('releasecomponent-list')
+        response = self.client.get(url + '?dist_git_branch=release_branch', format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+        self.assertEqual(response.data['results'][0]['name'], 'python27')
+        self.assertEqual(response.data['results'][1]['name'], 'MySQL-python')
+
     def test_detail_release_component(self):
         url = reverse('releasecomponent-detail', kwargs={'pk': 1})
         response = self.client.get(url, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['name'], 'python27')
-        self.assertEqual(response.data['dist_git_branch'], 'release_branch')
+        self.assertEqual(response.data['dist_git_branch'], 'test_branch')
 
     def test_release_component_contacts_url(self):
         url = reverse('releasecomponentcontact-list', kwargs={'instance_pk': 1})
@@ -1682,7 +1713,7 @@ class ReleaseComponentRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         url = reverse('releasecomponent-list')
         data = {
             "global_component": "MySQL-python",
-            "releases": "release-1.0",
+            "releases": ["release-1.0"],
             "contacts": [{
                 "contact_role": "pm",
                 "contact": {
@@ -1717,7 +1748,7 @@ class ReleaseComponentRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         url = reverse('releasecomponent-list')
         data = {
             "global_component": "MySQL-python",
-            "releases": [self.rhel5_inactive.release_id],
+            "release": self.rhel5_inactive.release_id,
             "name": "MySQL-python-1.2.5"
         }
         response = self.client.post(url, format='json', data=data)
@@ -1765,6 +1796,12 @@ class ReleaseComponentRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
 
 
 class ReleaseCloneWithComponentsTestCase(TestCaseWithChangeSetMixin, APITestCase):
+    # Cloning of just fixture data should log 6 entries in changeset.
+    #  * release
+    #  * two release components
+    #  * one component group
+    #  * two relationships
+
     fixtures = [
         "pdc/apps/release/fixtures/tests/release.json",
         "pdc/apps/component/fixtures/tests/upstream.json",
@@ -1775,6 +1812,9 @@ class ReleaseCloneWithComponentsTestCase(TestCaseWithChangeSetMixin, APITestCase
         'pdc/apps/component/fixtures/tests/release_component_group.json',
         'pdc/apps/component/fixtures/tests/release_component_relationship.json'
     ]
+
+    def setUp(self):
+        self.rc = models.ReleaseComponent.objects.get(name='python27')
 
     def test_clone_components(self):
         response = self.client.post(reverse('releaseclone-list'),
@@ -1806,27 +1846,22 @@ class ReleaseCloneWithComponentsTestCase(TestCaseWithChangeSetMixin, APITestCase
         self.assertNumChanges([6])
 
     def test_clone_component_with_contact(self):
-        response = self.client.put(reverse('releasecomponent-list'),
-                                   {'global_component': 'python', 'releases': ['release-1.0'],
-                                    'contacts': [{'contact_role': 'qe_ack',
-                                                  'contact': {'username': 'person1',
-                                                              'email': 'person1@test.com'}}]},
-                                   format='json')
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertNumChanges([3])
+        ReleaseComponentContact.objects.create(component=self.rc,
+                                               role=ContactRole.objects.get(name='qe_ack'),
+                                               contact=Person.objects.create(username='person1',
+                                                                             email='person1@example.com'))
 
         response = self.client.post(reverse('releaseclone-list'),
                                     {'old_release_id': 'release-1.0', 'version': '1.1'},
                                     format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertNumChanges([3, 6])
-        contacts = models.ReleaseComponent.objects.get(release__release_id='release-1.1',
-                                                       name='python27').contacts.all()
+        self.assertNumChanges([7])
+        contacts = ReleaseComponentContact.objects.filter(component__release__release_id='release-1.1',
+                                                          component__name='python27')
         self.assertEqual(1, len(contacts))
-        self.assertEqual('qe_ack', contacts[0].contact_role.name)
+        self.assertEqual('qe_ack', contacts[0].role.name)
         self.assertEqual('person1', contacts[0].contact.person.username)
-        count = sum([row.contacts.all().count() for row in models.ReleaseComponent.objects.all()])
-        self.assertEqual(2, count)
+        self.assertEqual(2, ReleaseComponentContact.objects.count())
 
     def test_clone_components_change_dist_git_branch(self):
         response = self.client.post(reverse('releaseclone-list'),
@@ -1840,9 +1875,8 @@ class ReleaseCloneWithComponentsTestCase(TestCaseWithChangeSetMixin, APITestCase
         self.assertEqual(['new_branch', 'new_branch'], [rc.dist_git_branch for rc in rcs])
 
     def test_clone_components_include_inactive_by_default(self):
-        rc = models.ReleaseComponent.objects.get(name='python27')
-        rc.active = False
-        rc.save()
+        self.rc.active = False
+        self.rc.save()
         response = self.client.post(reverse('releaseclone-list'),
                                     {'old_release_id': 'release-1.0', 'version': '1.1'},
                                     format='json')
@@ -1852,9 +1886,8 @@ class ReleaseCloneWithComponentsTestCase(TestCaseWithChangeSetMixin, APITestCase
         self.assertNumChanges([6])
 
     def test_clone_components_include_inactive_explicitly(self):
-        rc = models.ReleaseComponent.objects.get(name='python27')
-        rc.active = False
-        rc.save()
+        self.rc.active = False
+        self.rc.save()
         response = self.client.post(reverse('releaseclone-list'),
                                     {'old_release_id': 'release-1.0', 'version': '1.1',
                                      'include_inactive': True},
@@ -1864,9 +1897,8 @@ class ReleaseCloneWithComponentsTestCase(TestCaseWithChangeSetMixin, APITestCase
         self.assertNumChanges([6])
 
     def test_clone_components_exclude_inactive_explicitly(self):
-        rc = models.ReleaseComponent.objects.get(name='python27')
-        rc.active = False
-        rc.save()
+        self.rc.active = False
+        self.rc.save()
         response = self.client.post(reverse('releaseclone-list'),
                                     {'old_release_id': 'release-1.0', 'version': '1.1',
                                      'include_inactive': False},
@@ -2515,3 +2547,537 @@ class ReleaseComponentRelationshipRESTTestCase(TestCaseWithChangeSetMixin, APITe
 
         response = self.client.get(url, format='json')
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class GlobalComponentContactInfoRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
+    fixtures = [
+        "pdc/apps/component/fixtures/tests/global_component.json",
+        "pdc/apps/contact/fixtures/tests/contact_role.json",
+        "pdc/apps/contact/fixtures/tests/maillist.json",
+        "pdc/apps/contact/fixtures/tests/person.json",
+        "pdc/apps/component/fixtures/tests/upstream.json"
+    ]
+
+    @classmethod
+    def setUpTestData(cls):
+        GlobalComponentContact.objects.create(
+            component=models.GlobalComponent.objects.get(name='MySQL-python'),
+            role=ContactRole.objects.get(name='pm'),
+            contact=Person.objects.get(username='person1'))
+        GlobalComponentContact.objects.create(
+            component=models.GlobalComponent.objects.get(name='java'),
+            role=ContactRole.objects.get(name='qe_ack'),
+            contact=Maillist.objects.get(mail_name="maillist2"))
+
+    def setUp(self):
+        self.list_url = reverse('globalcomponentcontacts-list')
+
+    def test_list_global_component_contacts(self):
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 2)
+        results = response.data.get('results')
+        self.assertEqual(results[0]['role'], 'pm')
+        self.assertEqual(results[0]['contact']['email'], 'person1@test.com')
+
+        self.assertEqual(results[1]['role'], 'qe_ack')
+        self.assertEqual(results[1]['contact']['mail_name'], 'maillist2')
+
+    def test_retrieve_global_component_contacts(self):
+        response = self.client.get(reverse('globalcomponentcontacts-detail', args=[2]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['role'], 'qe_ack')
+        self.assertEqual(response.data['contact']['mail_name'], 'maillist2')
+        self.assertEqual(response.data['contact']['email'], 'maillist2@test.com')
+
+    def test_destroy_global_component_contacts(self):
+        self.client.delete(reverse('globalcomponentcontacts-detail', args=[2]))
+        self.assertEqual(0, GlobalComponentContact.objects.filter(pk=2).count())
+
+    def test_filter_global_component_contacts(self):
+        response = self.client.get(self.list_url, {'role': 'pm'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+
+        response = self.client.get(self.list_url, {'role': 'no_such_role'})
+        self.assertEqual(response.data['count'], 0)
+
+        response = self.client.get(self.list_url,
+                                   {'role': 'qe_ack', 'contact': 'maillist2'})
+        self.assertEqual(response.data['count'], 1)
+
+        # should not get anything
+        response = self.client.get(self.list_url,
+                                   {'role': 'qe_ack', 'contact': 'person1'})
+        self.assertEqual(response.data['count'], 0)
+
+        # should not get anything
+        response = self.client.get(self.list_url,
+                                   {'role': 'pm', 'contact': 'maillist2'})
+        self.assertEqual(response.data['count'], 0)
+
+        response = self.client.get(self.list_url, {'component': 'java'})
+        self.assertEqual(response.data['count'], 1)
+
+        response = self.client.get(self.list_url, {'component': 'no_component'})
+        self.assertEqual(response.data['count'], 0)
+
+    def test_create_global_component_contacts(self):
+        data = {'component': 'python', 'role': 'pm', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(3, GlobalComponentContact.objects.count())
+
+    def test_patch_global_component_contacts(self):
+        data = {"contact": {"username": "person2", "email": "person2@test.com"}}
+        response = self.client.patch(reverse('globalcomponentcontacts-detail', args=[2]),
+                                     data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        response.data['contact'].pop('id')
+        self.assertEqual(response.data['contact'], data['contact'])
+        self.assertNumChanges([1])
+
+    def test_create_global_component_contacts_exceed_count_limit(self):
+        data = {'component': 'python', 'role': 'cc', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': 'python', 'role': 'cc', 'contact': {'mail_name': 'maillist1'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_global_component_contacts_for_unlimited_role(self):
+        data = {'component': 'python', 'role': 'watcher', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': 'python', 'role': 'watcher', 'contact': {'mail_name': 'maillist1'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': 'python', 'role': 'watcher',
+                'contact': {"username": "person1", "email": "person1@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': 'python', 'role': 'watcher',
+                'contact': {"username": "person2", "email": "person2@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_create_global_component_contacts_for_role_limit_3(self):
+        data = {'component': 'python', 'role': 'allow_3_role', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': 'python', 'role': 'allow_3_role', 'contact': {'mail_name': 'maillist1'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': 'python', 'role': 'allow_3_role',
+                'contact': {"username": "person1", "email": "person1@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': 'python', 'role': 'allow_3_role',
+                'contact': {"username": "person2", "email": "person2@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_patch_global_component_contact_exceed_count_limit(self):
+        data = {'component': 'python', 'role': 'cc', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        data = {'component': 'python', 'role': 'watcher', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        pk = response.data['id']
+        url = reverse('globalcomponentcontacts-detail', args=[pk])
+        data = {'role': 'cc'}
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_patch_global_component_contacts_for_role_limit_3(self):
+        data = {'component': 'python', 'role': 'allow_3_role', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': 'python', 'role': 'allow_3_role', 'contact': {'mail_name': 'maillist1'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': 'python', 'role': 'cc',
+                'contact': {"username": "person1", "email": "person1@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        pk_cc = response.data['id']
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': 'python', 'role': 'watcher',
+                'contact': {"username": "person2", "email": "person2@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        pk_watcher = response.data['id']
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        # fourth for allow_3_role
+        url = reverse('globalcomponentcontacts-detail', args=[pk_cc])
+        data = {'role': 'allow_3_role'}
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        url = reverse('globalcomponentcontacts-detail', args=[pk_watcher])
+        data = {'role': 'allow_3_role'}
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # remove one and patch again
+        response = self.client.delete(reverse('globalcomponentcontacts-detail', args=[pk_cc]))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+        url = reverse('globalcomponentcontacts-detail', args=[pk_watcher])
+        data = {'role': 'allow_3_role'}
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_constraint_to_contact_role_count_limit_change(self):
+        data = {'component': 'python', 'role': 'allow_3_role', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': 'python', 'role': 'allow_3_role', 'contact': {'mail_name': 'maillist1'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': 'python', 'role': 'allow_3_role',
+                'contact': {"username": "person1", "email": "person1@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        pk = response.data['id']
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        contact_role_url = reverse('contactrole-detail', args=['allow_3_role'])
+        data = {'count_limit': '4'}
+        response = self.client.patch(contact_role_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        contact_role_url = reverse('contactrole-detail', args=['allow_3_role'])
+        data = {'count_limit': '2'}
+        response = self.client.patch(contact_role_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # remove one role contact and try again
+        response = self.client.delete(reverse('globalcomponentcontacts-detail', args=[pk]))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        data = {'count_limit': '2'}
+        response = self.client.patch(contact_role_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_constraint_to_contact_role_count_limit_change_for_different_roles(self):
+        data = {'component': 'python', 'role': 'allow_3_role', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': 'python', 'role': 'allow_3_role', 'contact': {'mail_name': 'maillist1'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': 'python', 'role': 'allow_3_role',
+                'contact': {"username": "person1", "email": "person1@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': 'python', 'role': 'cc',
+                'contact': {"username": "person1", "email": "person1@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        contact_role_url = reverse('contactrole-detail', args=['allow_3_role'])
+        data = {'count_limit': '2'}
+        response = self.client.patch(contact_role_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        contact_role_url = reverse('contactrole-detail', args=['cc'])
+        data = {'count_limit': '2'}
+        response = self.client.patch(contact_role_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        contact_role_url = reverse('contactrole-detail', args=['cc'])
+        data = {'count_limit': '1'}
+        response = self.client.patch(contact_role_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
+class ReleaseComponentContactInfoRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
+    fixtures = [
+        "pdc/apps/component/fixtures/tests/global_component.json",
+        "pdc/apps/release/fixtures/tests/release.json",
+        "pdc/apps/component/fixtures/tests/release_component.json",
+        "pdc/apps/contact/fixtures/tests/contact_role.json",
+        "pdc/apps/contact/fixtures/tests/maillist.json",
+        "pdc/apps/contact/fixtures/tests/person.json",
+        "pdc/apps/component/fixtures/tests/upstream.json"
+    ]
+
+    @classmethod
+    def setUpTestData(cls):
+        ReleaseComponentContact.objects.create(
+            component=models.ReleaseComponent.objects.get(name='MySQL-python'),
+            role=ContactRole.objects.get(name='pm'),
+            contact=Person.objects.get(username='person1'))
+        ReleaseComponentContact.objects.create(
+            component=models.ReleaseComponent.objects.get(name='python27'),
+            role=ContactRole.objects.get(name='qe_ack'),
+            contact=Maillist.objects.get(mail_name='maillist2'))
+
+    def setUp(self):
+        self.list_url = reverse('releasecomponentcontacts-list')
+
+    def test_list_release_component_contacts(self):
+        response = self.client.get(self.list_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 2)
+        results = response.data.get('results')
+        for result in results:
+            if result['id'] == 1:
+                self.assertEqual(result['role'], 'pm')
+                self.assertEqual(result['contact']['email'], 'person1@test.com')
+            else:
+                self.assertEqual(result['role'], 'qe_ack')
+                self.assertEqual(result['contact']['mail_name'], 'maillist2')
+
+    def test_retrieve_release_component_contacts(self):
+        response = self.client.get(reverse('releasecomponentcontacts-detail', args=[2]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['role'], 'qe_ack')
+        self.assertEqual(response.data['contact']['mail_name'], 'maillist2')
+        self.assertEqual(response.data['contact']['email'], 'maillist2@test.com')
+
+    def test_destroy_release_component_contact(self):
+        response = self.client.delete(reverse('releasecomponentcontacts-detail', args=[2]))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(0, ReleaseComponentContact.objects.filter(pk=2).count())
+
+    def test_filter_release_component_contacts(self):
+        response = self.client.get(self.list_url, {'role': 'pm'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+
+        response = self.client.get(self.list_url, {'role': 'no_such_role'})
+        self.assertEqual(response.data['count'], 0)
+
+        response = self.client.get(self.list_url, {'role': 'qe_ack', 'contact': 'maillist2'})
+        self.assertEqual(response.data['count'], 1)
+
+        # should not get anything
+        response = self.client.get(self.list_url, {'role': 'qe_ack', 'contact': 'person1'})
+        self.assertEqual(response.data['count'], 0)
+
+        # should not get anything
+        response = self.client.get(self.list_url, {'role': 'pm', 'contact': 'maillist2'})
+        self.assertEqual(response.data['count'], 0)
+
+        response = self.client.get(self.list_url, {'component': 'python27'})
+        self.assertEqual(response.data['count'], 1)
+
+        response = self.client.get(self.list_url, {'component': 'missing'})
+        self.assertEqual(response.data['count'], 0)
+
+    def test_filter_by_global_component(self):
+        response = self.client.get(self.list_url, {'global_component': 'python'})
+        self.assertEqual(response.data['count'], 1)
+
+    def test_filter_by_email(self):
+        response = self.client.get(self.list_url, {'email': 'person1@test.com'})
+        self.assertEqual(response.data['count'], 1)
+
+        response = self.client.get(self.list_url, {'email': 'maillist2@test.com'})
+        self.assertEqual(response.data['count'], 1)
+
+        response = self.client.get(self.list_url,
+                                   {'email': ['maillist2@test.com', 'person1@test.com']})
+        self.assertEqual(response.data['count'], 2)
+
+        response = self.client.get(self.list_url, {'email': 'bad@test.com'})
+        self.assertEqual(response.data['count'], 0)
+
+    def test_create_release_component_contacts(self):
+        data = {'component': {'id': 2}, 'role': 'cc', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(3, ReleaseComponentContact.objects.count())
+
+    def test_patch_release_component_contacts(self):
+        url = reverse('releasecomponentcontacts-detail', args=[2])
+        data = {"contact": {"username": "person2", "email": "person2@test.com"}}
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        response.data['contact'].pop('id')
+        self.assertEqual(response.data['contact'], data['contact'])
+        self.assertNumChanges([1])
+
+    def test_create_release_component_contacts_exceed_count_limit(self):
+        data = {'component': {'id': 2}, 'role': 'cc', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': {'id': 2}, 'role': 'cc', 'contact': {'mail_name': 'maillist1'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_release_component_contacts_for_unlimited_role(self):
+        data = {'component': {'id': 2}, 'role': 'watcher', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': {'id': 2}, 'role': 'watcher', 'contact': {'mail_name': 'maillist1'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': {'id': 2}, 'role': 'watcher',
+                'contact': {"username": "person1", "email": "person1@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': {'id': 2}, 'role': 'watcher',
+                'contact': {"username": "person2", "email": "person2@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_create_release_component_contacts_for_role_limit_3(self):
+        data = {'component': {'id': 2}, 'role': 'allow_3_role', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': {'id': 2}, 'role': 'allow_3_role', 'contact': {'mail_name': 'maillist1'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': {'id': 2}, 'role': 'allow_3_role',
+                'contact': {"username": "person1", "email": "person1@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': {'id': 2}, 'role': 'allow_3_role',
+                'contact': {"username": "person2", "email": "person2@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_patch_release_component_contact_exceed_count_limit(self):
+        data = {'component': {'id': 2}, 'role': 'cc', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        data = {'component': {'id': 2}, 'role': 'watcher', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        pk = response.data['id']
+        url = reverse('releasecomponentcontacts-detail', args=[pk])
+        data = {'role': 'cc'}
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_patch_release_component_contacts_for_role_limit_3(self):
+        data = {'component': {'id': 2}, 'role': 'allow_3_role', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': {'id': 2}, 'role': 'allow_3_role', 'contact': {'mail_name': 'maillist1'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': {'id': 2}, 'role': 'cc',
+                'contact': {"username": "person1", "email": "person1@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        pk_cc = response.data['id']
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': {'id': 2}, 'role': 'watcher',
+                'contact': {"username": "person2", "email": "person2@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        pk_watcher = response.data['id']
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        # fourth for allow_3_role
+        url = reverse('releasecomponentcontacts-detail', args=[pk_cc])
+        data = {'role': 'allow_3_role'}
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        url = reverse('releasecomponentcontacts-detail', args=[pk_watcher])
+        data = {'role': 'allow_3_role'}
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # remove one and patch again
+        response = self.client.delete(reverse('releasecomponentcontacts-detail', args=[pk_cc]))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+        url = reverse('releasecomponentcontacts-detail', args=[pk_watcher])
+        data = {'role': 'allow_3_role'}
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_constraint_to_contact_role_count_limit_change(self):
+        data = {'component': {'id': 2}, 'role': 'allow_3_role', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': {'id': 2}, 'role': 'allow_3_role', 'contact': {'mail_name': 'maillist1'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': {'id': 2}, 'role': 'allow_3_role',
+                'contact': {"username": "person1", "email": "person1@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        pk = response.data['id']
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        contact_role_url = reverse('contactrole-detail', args=['allow_3_role'])
+        data = {'count_limit': '4'}
+        response = self.client.patch(contact_role_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        contact_role_url = reverse('contactrole-detail', args=['allow_3_role'])
+        data = {'count_limit': '2'}
+        response = self.client.patch(contact_role_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # remove one role contact and try again
+        response = self.client.delete(reverse('releasecomponentcontacts-detail', args=[pk]))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        data = {'count_limit': '2'}
+        response = self.client.patch(contact_role_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_constraint_to_contact_role_count_limit_change_for_different_roles(self):
+        data = {'component': {'id': 2}, 'role': 'allow_3_role', 'contact': {'mail_name': 'maillist2'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': {'id': 2}, 'role': 'allow_3_role', 'contact': {'mail_name': 'maillist1'}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': {'id': 2}, 'role': 'allow_3_role',
+                'contact': {"username": "person1", "email": "person1@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        data = {'component': {'id': 2}, 'role': 'cc',
+                'contact': {"username": "person1", "email": "person1@test.com"}}
+        response = self.client.post(self.list_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        contact_role_url = reverse('contactrole-detail', args=['allow_3_role'])
+        data = {'count_limit': '2'}
+        response = self.client.patch(contact_role_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        contact_role_url = reverse('contactrole-detail', args=['cc'])
+        data = {'count_limit': '2'}
+        response = self.client.patch(contact_role_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        contact_role_url = reverse('contactrole-detail', args=['cc'])
+        data = {'count_limit': '1'}
+        response = self.client.patch(contact_role_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)

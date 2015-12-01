@@ -7,14 +7,13 @@ import json
 
 from django.contrib.contenttypes.models import ContentType
 from django.core.urlresolvers import reverse
-from django.shortcuts import get_object_or_404
 from django.utils import six
 from django.utils.text import capfirst
 
 from rest_framework import serializers
 
-from pdc.apps.contact.models import Contact, ContactRole
-from pdc.apps.contact.serializers import RoleContactSerializer
+from pdc.apps.contact.models import Contact, ContactRole, GlobalComponentContact, ReleaseComponentContact
+from pdc.apps.contact.serializers import RoleContactSerializer, ContactField
 from pdc.apps.common.serializers import DynamicFieldsSerializerMixin, LabelSerializer, StrictSerializerMixin
 from pdc.apps.common.fields import ChoiceSlugField
 from pdc.apps.release.models import Release
@@ -30,17 +29,6 @@ from .models import (GlobalComponent,
                      ReleaseComponentRelationshipType,
                      ReleaseComponentRelationship)
 from . import signals
-
-
-__all__ = (
-    'GlobalComponentSerializer',
-    'ReleaseComponentSerializer',
-    'HackedContactSerializer',
-    'UpstreamSerializer',
-    'BugzillaComponentSerializer',
-    'GroupSerializer',
-    'GroupTypeSerializer'
-)
 
 
 def reverse_url(request, view_name, **kwargs):
@@ -317,7 +305,7 @@ class ReleaseComponentTypeSerializer(StrictSerializerMixin, serializers.ModelSer
 
     class Meta:
         model = ReleaseComponentType
-        fields = ('name',)
+        fields = ('name', 'has_osbs')
 
 
 class ReleaseComponentSerializer(DynamicFieldsSerializerMixin,
@@ -335,8 +323,7 @@ class ReleaseComponentSerializer(DynamicFieldsSerializerMixin,
     bugzilla_component = TreeForeignKeyField(read_only=False, required=False, allow_null=True)
     brew_package = serializers.CharField(required=False)
     active = serializers.BooleanField(required=False, default=True)
-    type = ChoiceSlugField(slug_field='name', queryset=ReleaseComponentType.objects.all(), required=False,
-                           allow_null=True)
+    type = ChoiceSlugField(slug_field='name', queryset=ReleaseComponentType.objects.all(), required=False)
 
     def update(self, instance, validated_data):
         signals.releasecomponent_serializer_extract_data.send(sender=self, validated_data=validated_data)
@@ -385,42 +372,8 @@ class ReleaseComponentSerializer(DynamicFieldsSerializerMixin,
         return super(ReleaseComponentSerializer, self).to_internal_value(data)
 
     def validate_release(self, value):
-        if not isinstance(value, Release):
-            if isinstance(value, dict):
-                release_id = value['release_id']
-            else:
-                release_id = value
-            if release_id is None or release_id.strip() == "":
-                self._errors = {'release': 'This field is required.'}
-                return
-            release = get_object_or_404(Release, release_id=release_id)
-            if not release.is_active():
-                self._errors = {'release': 'Can not create a release component with an inactive release.'}
-                return
-            value = release
-        return value
-
-    def validate_global_component(self, value):
-        if not isinstance(value, GlobalComponent):
-            global_component_name = value
-            if global_component_name is None or global_component_name.strip() == "":
-                self._errors = {'global_component': 'This field is required.'}
-                return
-            gc = get_object_or_404(GlobalComponent, name=global_component_name)
-            value = gc
-        return value
-
-    def validate_name(self, value):
-        if value.strip() == "":
-            self._errors = {'name': 'This field is required.'}
-        return value
-
-    def validate_type(self, value):
-        if not isinstance(value, ReleaseComponentType):
-            if value is not None and value.strip() != "":
-                value = get_object_or_404(ReleaseComponentType, name=value.strip())
-            else:
-                raise serializers.ValidationError("This field can't be set to null.")
+        if not value.is_active():
+            raise serializers.ValidationError('Can not create a release component with an inactive release.')
         return value
 
     class Meta:
@@ -438,14 +391,17 @@ class GroupTypeSerializer(StrictSerializerMixin, serializers.ModelSerializer):
         fields = ('id', 'name', 'description')
 
 
-class ReleaseComponentRelatedField(serializers.RelatedField):
-    doc_format = '{"id": "int", "name": "string"}'
+class ReleaseComponentField(serializers.RelatedField):
+    """Serializer field for including release component details."""
+    doc_format = '{"id": "int", "name": "string", "release": "Release.release_id"}'
+    writable_doc_format = '{"release": "Release.release_id", "name": "string"}'
 
     def to_representation(self, value):
         result = dict()
         if value:
             result['id'] = value.id
             result['name'] = value.name
+            result['release'] = value.release.release_id
         return result
 
     def to_internal_value(self, data):
@@ -469,6 +425,18 @@ class ReleaseComponentRelatedField(serializers.RelatedField):
         return rc
 
 
+class ReleaseComponentWithoutReleaseField(ReleaseComponentField):
+    """Exactly the same as ReleaseComponentField, but does not include release."""
+    doc_format = '{"id": "int", "name": "string"}'
+
+    def to_representation(self, value):
+        result = dict()
+        if value:
+            result['id'] = value.id
+            result['name'] = value.name
+        return result
+
+
 class GroupSerializer(StrictSerializerMixin, serializers.ModelSerializer):
     group_type = serializers.SlugRelatedField(
         queryset=GroupType.objects.all(),
@@ -481,7 +449,7 @@ class GroupSerializer(StrictSerializerMixin, serializers.ModelSerializer):
         required=True
     )
     description = serializers.CharField(required=True)
-    components = ReleaseComponentRelatedField(
+    components = ReleaseComponentWithoutReleaseField(
         required=False,
         many=True,
         queryset=ReleaseComponent.objects.all()
@@ -516,18 +484,6 @@ class RCRelationshipTypeSerializer(StrictSerializerMixin, serializers.ModelSeria
         fields = ('name',)
 
 
-class RCForRelationshipRelatedField(ReleaseComponentRelatedField):
-    doc_format = '{"id": "int", "name": "string", "release": "Release.release_id"}'
-
-    def to_representation(self, value):
-        result = dict()
-        if value:
-            result['id'] = value.id
-            result['name'] = value.name
-            result['release'] = value.release.release_id
-        return result
-
-
 class ReleaseComponentRelationshipSerializer(StrictSerializerMixin, serializers.ModelSerializer):
     type = ChoiceSlugField(
         queryset=ReleaseComponentRelationshipType.objects.all(),
@@ -535,11 +491,11 @@ class ReleaseComponentRelationshipSerializer(StrictSerializerMixin, serializers.
         required=True,
         source='relation_type'
     )
-    from_component = RCForRelationshipRelatedField(
+    from_component = ReleaseComponentField(
         required=True,
         queryset=ReleaseComponent.objects.all()
     )
-    to_component = RCForRelationshipRelatedField(
+    to_component = ReleaseComponentField(
         required=True,
         queryset=ReleaseComponent.objects.all()
     )
@@ -547,3 +503,27 @@ class ReleaseComponentRelationshipSerializer(StrictSerializerMixin, serializers.
     class Meta:
         model = ReleaseComponentRelationship
         fields = ('id', 'type', 'from_component', 'to_component')
+
+
+class GlobalComponentContactSerializer(StrictSerializerMixin, serializers.ModelSerializer):
+    component = serializers.SlugRelatedField(slug_field='name', read_only=False,
+                                             queryset=GlobalComponent.objects.all())
+    role = serializers.SlugRelatedField(slug_field='name', read_only=False,
+                                        queryset=ContactRole.objects.all())
+    contact = ContactField()
+
+    class Meta:
+        model = GlobalComponentContact
+        fields = ('id', 'component', 'role', 'contact')
+
+
+class ReleaseComponentContactSerializer(StrictSerializerMixin, serializers.ModelSerializer):
+    component = ReleaseComponentField(read_only=False,
+                                      queryset=ReleaseComponent.objects.all())
+    role = serializers.SlugRelatedField(slug_field='name', read_only=False,
+                                        queryset=ContactRole.objects.all())
+    contact = ContactField()
+
+    class Meta:
+        model = ReleaseComponentContact
+        fields = ('id', 'component', 'role', 'contact')

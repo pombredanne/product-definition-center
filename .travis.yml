@@ -7,6 +7,7 @@ addons:
             - uuid-dev
             - swig
             - libldap2-dev
+            - graphviz
 # The sed command is a terrible hack: we can't easily install koji on Ubuntu.
 # PDC does not need it, it is a dependency of kobo. However, PDC does not use
 # any part of kobo that would actively use koji, se we just delete the
@@ -19,16 +20,12 @@ install:
     - pip install -r requirements/devel.txt
     - sed -i -E '/import (koji|rpm)/d' $(python -vc 'import kobo.rpmlib' 2>&1 | grep 'import kobo.rpmlib' | awk '{print$NF}' | sed 's/pyc$/py/')
 script:
-    - coverage run --parallel-mode --source=contrib,pdc --omit='*tests.py,*/migrations/*,pdc/settings*' manage.py test --settings pdc.settings_test contrib pdc
+    - coverage run --source=contrib,pdc --omit='*tests.py,*/migrations/*,pdc/settings*' manage.py test --settings pdc.settings_test contrib pdc
     - make flake8
-    - coverage run --parallel-mode --source=pdc_client client_test_run.py
+    - bash verify-migrations.sh
 after_success:
-    - coverage combine
     - coveralls
-    - cd docs
-    - make setup_gh_pages
-    - make generate
-    - if [ "$TRAVIS_BRANCH" = "master" -a "$TRAVIS_PULL_REQUEST" = "false" ]; then make deploy; fi
+    - if [ "$TRAVIS_BRANCH" = "master" -a "$TRAVIS_PULL_REQUEST" = "false" ]; then make deploy_doc; fi
 cache:
     directories:
         - $HOME/.cache/pip
@@ -36,5 +33,5 @@ before_cache:
     - rm -f $HOME/.cache/pip/log/debug.log
 env:
     global:
-    - GH_REPO="release-engineering/product-definition-center"
+    - GH_REPO="product-definition-center/product-definition-center"
     - secure: "rM4IjcV6afLNFFLSFF7kuCRZXF0DVErrnD4/MXHQ71IFBLrOBf3Av7wT2kTVTWeeFKFy/mmtwcieWjGRzdmpLHK0lSkt9zaJslzvyHr5+uUzYKPGia0gSNzVx01pMQGYBxpNJZcx1I5j+xDj3TEFLoD5qinn5RGsnpHmyZcIytwF2h0LiOMxJF6aHeyp1poCrRa8duTL2Wl7nV5+kWAhcax9dToTA/eLjeiE4BpiaYgf0zcmW55SW51/C9fFaU0o0W4vgH36WhY8G7hWdG7CmcUgtKXlbVWDZKNihbCOzDynZ64N3KUZ2pr7XY/XfQbR14pp5xzwuVIQBytNcIAnodf2Ijfhq8C7mwvpZwyvsCW2ENq2Ld1rzJ4rNszW2sS2CTOglrI+g0yvFbKW2YwzTem0ltm/uDKLh1zhaWxWbAlV6Z1tIYMweSDs7JKGKc+ZnvmaOPkz9l3q21I2GKuXVBMrD9wTmcDLrbqbSXf5ZpnllFXzUUjILAehUWFGk6RNKqnzbnpOFbT76HF7j3D6AN2jtsizk9kh6vre80SkqINyXpi3UhlYhmNKEjSupE4Nuu46F4BnVp4q3kpHAUP4JhcuJNkhg7VA5u1u78ibH+SD+jsmOKJoEqorDGOOx/rUYHcC9nWIRMdHLw23PurMw63aUwdQ054wP1CQkZh0la8="

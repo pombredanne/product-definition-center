@@ -32,7 +32,7 @@ class RepoViewSet(ChangeSetCreateModelMixin,
     Please access this endpoint by [%(HOST_NAME)s/%(API_PATH)s/content-delivery-repos/](/%(API_PATH)s/content-delivery-repos/).
     Endpoint [%(HOST_NAME)s/%(API_PATH)s/repos/](/%(API_PATH)s/repos/) is deprecated.
     """
-    queryset = models.Repo.objects.all().select_related()
+    queryset = models.Repo.objects.all().select_related().order_by('id')
     serializer_class = serializers.RepoSerializer
     filter_class = filters.RepoFilter
 
@@ -68,6 +68,18 @@ class RepoViewSet(ChangeSetCreateModelMixin,
         __Response__: Same as input data.
         """
         return super(RepoViewSet, self).create(*args, **kwargs)
+
+    def retrieve(self, *args, **kwargs):
+        """
+        __Method__: `GET`
+
+        __URL__: $LINK:repo-detail:id$
+
+        __Response__:
+
+        %(SERIALIZER)s
+        """
+        return super(RepoViewSet, self).retrieve(*args, **kwargs)
 
     def list(self, *args, **kwargs):
         """
@@ -246,7 +258,7 @@ class RepoFamilyViewSet(StrictQueryParamMixin,
     -d _data_ (a json string). or GUI plugins for
     browsers, such as ``RESTClient``, ``RESTConsole``.
     """
-    queryset = models.RepoFamily.objects.all()
+    queryset = models.RepoFamily.objects.all().order_by('id')
     serializer_class = serializers.RepoFamilySerializer
     filter_class = filters.RepoFamilyFilter
 
@@ -295,9 +307,14 @@ class ContentCategoryViewSet(StrictQueryParamMixin,
                              viewsets.GenericViewSet):
     """
     API endpoint that allows content_category to be viewed.
+
+    Please access this endpoint by [%(HOST_NAME)s/%(API_PATH)s/content-delivery-content-categories/](/%(API_PATH)s/
+    content-delivery-content-categories/).
+    Endpoint [%(HOST_NAME)s/%(API_PATH)s/content-delivery-content-category/](/%(API_PATH)s/
+    content-delivery-content-category/) is deprecated.
     """
     serializer_class = serializers.ContentCategorySerializer
-    queryset = models.ContentCategory.objects.all()
+    queryset = models.ContentCategory.objects.all().order_by('id')
 
     def list(self, request, *args, **kwargs):
         """
@@ -317,9 +334,15 @@ class ContentFormatViewSet(StrictQueryParamMixin,
                            viewsets.GenericViewSet):
     """
     API endpoint that allows content_format to be viewed.
+
+    Please access this endpoint by
+    [%(HOST_NAME)s/%(API_PATH)s/content-delivery-content-formats/](/%(API_PATH)s/content-delivery-content-formats/).
+    Endpoint
+    [%(HOST_NAME)s/%(API_PATH)s/content-delivery-content-format/](/%(API_PATH)s/content-delivery-content-format/)
+    is deprecated.
     """
     serializer_class = serializers.ContentFormatSerializer
-    queryset = models.ContentFormat.objects.all()
+    queryset = models.ContentFormat.objects.all().order_by('id')
 
     def list(self, request, *args, **kwargs):
         """
@@ -339,9 +362,14 @@ class ServiceViewSet(StrictQueryParamMixin,
                      viewsets.GenericViewSet):
     """
     API endpoint that allows service to be viewed.
+
+    Please access this endpoint by
+    [%(HOST_NAME)s/%(API_PATH)s/content-delivery-services/](/%(API_PATH)s/content-delivery-services/).
+    Endpoint
+    [%(HOST_NAME)s/%(API_PATH)s/content-delivery-service/](/%(API_PATH)s/content-delivery-service/) is deprecated.
     """
     serializer_class = serializers.ServiceSerializer
-    queryset = models.Service.objects.all()
+    queryset = models.Service.objects.all().order_by('id')
 
     def list(self, request, *args, **kwargs):
         """

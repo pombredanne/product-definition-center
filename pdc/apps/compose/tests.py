@@ -51,131 +51,6 @@ class ComposeModelTestCase(TestCase):
                              {'Server': {'x86_64': 'untested'}, 'Server2': {'x86_64': 'untested'}})
 
 
-class VersionFinderTestCase(APITestCase):
-    # TODO: This test case could be removed after removing endpoint 'compose/package'
-    fixtures = [
-        "pdc/apps/common/fixtures/test/sigkey.json",
-        "pdc/apps/package/fixtures/test/rpm.json",
-        "pdc/apps/release/fixtures/tests/product.json",
-        "pdc/apps/release/fixtures/tests/product_version.json",
-        "pdc/apps/release/fixtures/tests/release.json",
-        "pdc/apps/compose/fixtures/tests/variant.json",
-        "pdc/apps/compose/fixtures/tests/variant_arch.json",
-        "pdc/apps/compose/fixtures/tests/compose_overriderpm.json",
-        "pdc/apps/compose/fixtures/tests/compose.json",
-        "pdc/apps/compose/fixtures/tests/compose_composerpm.json",
-        "pdc/apps/compose/fixtures/tests/more_composes.json",
-    ]
-
-    def setUp(self):
-        self.url = reverse('findcomposewitholderpackage-list')
-
-    def test_bad_args_missing_rpm_name(self):
-        response = self.client.get(self.url, {'compose': 'compose-1'})
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('rpm_name', response.data.get('detail'))
-
-    def test_bad_args_missing_release_and_compose(self):
-        response = self.client.get(self.url, {'rpm_name': 'bash'})
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('release', response.data.get('detail'))
-        self.assertIn('compose', response.data.get('detail'))
-
-    def test_missing_previous_compose(self):
-        response = self.client.get(self.url, {'compose': 'compose-1', 'rpm_name': 'bash'})
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
-
-    def test_previous_compose_has_same_version(self):
-        response = self.client.get(self.url, {'compose': 'compose-2', 'rpm_name': 'bash'})
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
-
-    def test_previous_compose_has_older_rpm(self):
-        response = self.client.get(self.url, {'compose': 'compose-3', 'rpm_name': 'bash'})
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data.get('compose'), "compose-2")
-        self.assertEqual(response.data.get('packages'), ["bash-0:1.2.3-4.b1.x86_64.rpm"])
-
-    def test_same_version_different_arch(self):
-        """There is a previous compose with same version of package, but with different RPM.arch."""
-        models.ComposeRPM.objects.filter(pk=1).update(rpm=3)
-        response = self.client.get(self.url, {'compose': 'compose-2', 'rpm_name': 'bash'})
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
-
-    def test_get_for_release(self):
-        response = self.client.get(self.url, {'rpm_name': 'bash', 'release': 'release-1.0'})
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data,
-                         [{'compose': 'compose-1', 'packages': ['bash-0:1.2.3-4.b1.x86_64.rpm']},
-                          {'compose': 'compose-2', 'packages': ['bash-0:1.2.3-4.b1.x86_64.rpm']},
-                          {'compose': 'compose-3', 'packages': ['bash-0:5.6.7-8.x86_64.rpm']}])
-
-    def test_get_for_release_with_latest(self):
-        response = self.client.get(self.url, {'rpm_name': 'bash', 'release': 'release-1.0', 'latest': 'True'})
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data,
-                         [{'compose': 'compose-3', 'packages': ['bash-0:5.6.7-8.x86_64.rpm']}])
-
-    def test_get_for_release_to_dict(self):
-        response = self.client.get(self.url, {'rpm_name': 'bash', 'release': 'release-1.0', 'to_dict': True})
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        expected = [
-            {'compose': u'compose-1', 'packages': [
-                {'name': u'bash', 'version': u'1.2.3', 'epoch': 0, 'release': u'4.b1',
-                 'arch': u'x86_64', 'srpm_name': u'bash', 'srpm_nevra': u'bash-0:1.2.3-4.b1.src',
-                 'filename': 'bash-1.2.3-4.b1.x86_64.rpm', 'id': 1,
-                 'linked_composes': [u'compose-1', u'compose-2'], 'linked_releases': []}]},
-            {'compose': u'compose-2', 'packages': [
-                {'name': u'bash', 'version': u'1.2.3', 'epoch': 0, 'release': u'4.b1',
-                 'arch': u'x86_64', 'srpm_name': u'bash', 'srpm_nevra': u'bash-0:1.2.3-4.b1.src',
-                 'filename': 'bash-1.2.3-4.b1.x86_64.rpm', 'id': 1,
-                 'linked_composes': [u'compose-1', u'compose-2'], 'linked_releases': []}]},
-            {'compose': u'compose-3', 'packages': [
-                {'name': u'bash', 'version': u'5.6.7', 'epoch': 0, 'release': u'8',
-                 'arch': u'x86_64', 'srpm_name': u'bash', 'srpm_nevra': None,
-                 'filename': 'bash-5.6.7-8.x86_64.rpm', 'id': 2,
-                 'linked_composes': [u'compose-3'], 'linked_releases': []}]}
-        ]
-        self.assertEqual(response.data, expected)
-
-    def test_get_for_product_version(self):
-        product_version = ProductVersion.objects.get(short='product', version='1')
-        release = Release.objects.get(release_id='release-1.0')
-        release.product_version = product_version
-        release.save()
-        response = self.client.get(self.url, {'rpm_name': 'bash', 'product_version': 'product-1'})
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data,
-                         [{'compose': 'compose-1', 'packages': ['bash-0:1.2.3-4.b1.x86_64.rpm']},
-                          {'compose': 'compose-2', 'packages': ['bash-0:1.2.3-4.b1.x86_64.rpm']},
-                          {'compose': 'compose-3', 'packages': ['bash-0:5.6.7-8.x86_64.rpm']}])
-
-    def test_get_for_product_version_with_latest(self):
-        product_version = ProductVersion.objects.get(short='product', version='1')
-        release = Release.objects.get(release_id='release-1.0')
-        release.product_version = product_version
-        release.save()
-        response = self.client.get(self.url, {'rpm_name': 'bash', 'product_version': 'product-1',
-                                              'latest': 'True'})
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data,
-                         [{'compose': 'compose-3', 'packages': ['bash-0:5.6.7-8.x86_64.rpm']}])
-
-    def test_get_for_included_compose_type(self):
-        response = self.client.get(self.url, {'rpm_name': 'bash', 'release': 'release-1.0',
-                                              'included_compose_type': 'production'})
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data,
-                         [{'compose': 'compose-1', 'packages': ['bash-0:1.2.3-4.b1.x86_64.rpm']},
-                          {'compose': 'compose-2', 'packages': ['bash-0:1.2.3-4.b1.x86_64.rpm']}])
-
-    def test_get_for_excluded_compose_type(self):
-        response = self.client.get(self.url, {'rpm_name': 'bash', 'release': 'release-1.0',
-                                              'excluded_compose_type': 'production'})
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data,
-                         [{'compose': 'compose-3', 'packages': ['bash-0:5.6.7-8.x86_64.rpm']}])
-
-
 class FindComposeByReleaseRPMTestCase(APITestCase):
     fixtures = [
         "pdc/apps/common/fixtures/test/sigkey.json",
@@ -1950,3 +1825,193 @@ class UselessOverrideTestCase(TestCase):
         self.assertEqual(response.status_code, 302)
         orpm = models.OverrideRPM.objects.latest('id')
         self.assertFalse(orpm.include)
+
+
+class ComposeTreeAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
+    fixtures = [
+        "pdc/apps/release/fixtures/tests/release.json",
+        "pdc/apps/compose/fixtures/tests/variant.json",
+        "pdc/apps/compose/fixtures/tests/variant_arch.json",
+        "pdc/apps/compose/fixtures/tests/location.json",
+        "pdc/apps/compose/fixtures/tests/scheme.json",
+        "pdc/apps/compose/fixtures/tests/compose.json",
+        "pdc/apps/compose/fixtures/tests/composetree.json",
+    ]
+
+    def setUp(self):
+        self.compose = models.Compose.objects.get(compose_id='compose-1')
+        self.variant = models.Variant.objects.get(variant_uid='Server')
+        self.location = models.Location.objects.get(short='NAY')
+        self.scheme = models.Scheme.objects.get(name='nfs')
+
+    def test_list(self):
+        response = self.client.get(reverse('composetreelocations-list'), {})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+
+    def test_query_composeid(self):
+        response = self.client.get(reverse('composetreelocations-list'), {"compose": "compose-1"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+
+    def test_query_composeid_nonexisting(self):
+        response = self.client.get(reverse('composetreelocations-list'), {"compose": "does-not-exist"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_query_variant(self):
+        response = self.client.get(reverse('composetreelocations-list'), {"variant": "Server"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+
+    def test_query_variant_nonexisting(self):
+        response = self.client.get(reverse('composetreelocations-list'), {"variant": "does-not-exist"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_query_arch(self):
+        response = self.client.get(reverse('composetreelocations-list'), {"arch": "x86_64"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+
+    def test_query_arch_nonexisting(self):
+        response = self.client.get(reverse('composetreelocations-list'), {"arch": "does-not-exist"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_query_location(self):
+        response = self.client.get(reverse('composetreelocations-list'), {"location": "NAY"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+
+    def test_query_location_nonexisting(self):
+        response = self.client.get(reverse('composetreelocations-list'), {"location": "does-not-exist"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_query_scheme(self):
+        response = self.client.get(reverse('composetreelocations-list'), {"scheme": "nfs"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+
+    def test_query_scheme_nonexisting(self):
+        response = self.client.get(reverse('composetreelocations-list'), {"scheme": "does-not-exist"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_create_composetree(self):
+        url = reverse('composetreelocations-list')
+        data = {'compose': 'compose-1', 'variant': 'Server', 'arch': 'x86_64', 'location': 'BRQ',
+                'url': 'nfs://nay.lab.la/', 'scheme': 'nfs', 'synced_content': ['debug']}
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertNumChanges([1])
+
+    def test_create_composetree_default_syncedcontent(self):
+        url = reverse('composetreelocations-list')
+        data = {'compose': 'compose-1', 'variant': 'Server', 'arch': 'x86_64', 'location': 'BRQ',
+                'url': 'nfs://nay.lab.la/', 'scheme': 'nfs'}
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['synced_content'], ['binary', 'debug', 'source'])
+        self.assertNumChanges([1])
+
+    def test_create_composetree_with_wrong_arch(self):
+        url = reverse('composetreelocations-list')
+        data = {'compose': 'compose-1', 'variant': 'Server', 'arch': 'i386', 'location': 'BRQ',
+                'url': 'nfs://nay.lab.la/', 'scheme': 'nfs'}
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_composetree_duplicate(self):
+        url = reverse('composetreelocations-list')
+        data = {'compose': 'compose-1', 'variant': 'Server', 'arch': 'x86_64', 'location': 'NAY',
+                'url': 'nfs://nay.lab.la/', 'scheme': 'nfs'}
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_bulk_create(self):
+        url = reverse('composetreelocations-list')
+        data = [{'compose': 'compose-1', 'variant': 'Server', 'arch': 'x86_64', 'location': 'BRQ',
+                'url': 'nfs://nay.lab.la/', 'scheme': 'nfs'},
+                {'compose': 'compose-1', 'variant': 'Server2', 'arch': 'x86_64', 'location': 'NAY',
+                'url': 'nfs://nay.lab.la/', 'scheme': 'nfs'}]
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data[0].get('synced_content'), ['binary', 'debug', 'source'])
+        self.assertNumChanges([2])
+
+    def test_detail(self):
+        response = self.client.get(reverse('composetreelocations-detail',
+                                           args=['compose-1/Server/x86_64/NAY']))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['location'], 'NAY')
+        self.assertEqual(response.data['synced_content'], ['binary'])
+
+    def test_can_not_perform_full_update(self):
+        response = self.client.put(reverse('composetreelocations-detail',
+                                           args=['compose-1/Server/x86_64/NAY']), {})
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_can_update_scheme(self):
+        response = self.client.patch(reverse('composetreelocations-detail',
+                                             args=['compose-1/Server/x86_64/NAY']),
+                                     {'scheme': 'http'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('scheme'), 'http')
+        self.assertNumChanges([1])
+
+    def test_can_update_url(self):
+        response = self.client.patch(reverse('composetreelocations-detail',
+                                             args=['compose-1/Server/x86_64/NAY']),
+                                     {'url': 'http://example.com'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('url'), 'http://example.com')
+        self.assertNumChanges([1])
+
+    def test_can_update_syncedcontent(self):
+        response = self.client.patch(reverse('composetreelocations-detail',
+                                             args=['compose-1/Server/x86_64/NAY']),
+                                     {'synced_content': ['binary', 'debug', 'source']})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('synced_content'), ['binary', 'debug', 'source'])
+        self.assertNumChanges([1])
+
+    def test_can_update_syncedcontent_duplicate(self):
+        response = self.client.patch(reverse('composetreelocations-detail',
+                                             args=['compose-1/Server/x86_64/NAY']),
+                                     {'synced_content': ['binary', 'debug', 'source', 'binary']})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('synced_content'), ['binary', 'debug', 'source'])
+        self.assertNumChanges([1])
+
+    def test_can_bulk_update_syncedcontent(self):
+        url = reverse('composetreelocations-list')
+        data = {'compose-1/Server/x86_64/NAY': {'scheme': 'http', 'url': 'http://example.com', 'synced_content': ['binary', 'debug', 'source']},
+                'compose-1/Server2/x86_64/BRQ': {'scheme': 'http', 'url': 'http://example.com', 'synced_content': ['binary', 'debug', 'source']}}
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['compose-1/Server2/x86_64/BRQ'].get('synced_content'),
+                         ['binary', 'debug', 'source'])
+        self.assertNumChanges([2])
+
+    def test_delete_existing(self):
+        response = self.client.delete(reverse('composetreelocations-detail',
+                                              args=['compose-1/Server/x86_64/NAY']))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(models.ComposeTree.objects.count(), 1)
+        self.assertNumChanges([1])
+
+    def test_delete_non_existing(self):
+        response = self.client.delete(reverse('composetreelocations-detail',
+                                              args=['compose-2/Server/x86_64/NAY']))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(models.ComposeTree.objects.count(), 2)
+        self.assertNumChanges([])
+
+    def test_bulk_delete(self):
+        data = ['compose-1/Server/x86_64/NAY', 'compose-1/Server2/x86_64/BRQ']
+        response = self.client.delete(reverse('composetreelocations-list'), data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(models.ComposeTree.objects.count(), 0)
+        self.assertNumChanges([2])

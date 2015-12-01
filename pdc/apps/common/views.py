@@ -3,32 +3,19 @@
 # Licensed under The MIT License (MIT)
 # http://opensource.org/licenses/MIT
 #
+import json
+
 from django.shortcuts import render
+from django.views import defaults
+from django.http import HttpResponse
 
-from kobo.django.views.generic import ListView
-
-from rest_framework import viewsets, mixins
+from rest_framework import viewsets, mixins, status
 
 from .models import Arch, SigKey, Label
 from . import viewsets as pdc_viewsets
 from .serializers import LabelSerializer, ArchSerializer, SigKeySerializer
 from .filters import LabelFilter, SigKeyFilter
-
-
-class ArchListView(ListView):
-    model = Arch
-    queryset = Arch.objects.all()
-    allow_empty = True
-    template_name = "arch_list.html"
-    context_object_name = "arch_list"
-
-
-class SigKeyListView(ListView):
-    model = SigKey
-    queryset = SigKey.objects.all()
-    allow_empty = True
-    template_name = "sigkey_list.html"
-    context_object_name = "sigkey_list"
+from . import handlers
 
 
 class LabelViewSet(pdc_viewsets.PDCModelViewSet):
@@ -45,7 +32,7 @@ class LabelViewSet(pdc_viewsets.PDCModelViewSet):
     browsers, such as ``RESTClient``, ``RESTConsole``.
     """
     serializer_class = LabelSerializer
-    queryset = Label.objects.all()
+    queryset = Label.objects.all().order_by('id')
     filter_class = LabelFilter
 
     def create(self, request, *args, **kwargs):
@@ -220,7 +207,7 @@ class ArchViewSet(pdc_viewsets.ChangeSetCreateModelMixin,
     browsers, such as ``RESTClient``, ``RESTConsole``.
     """
     serializer_class = ArchSerializer
-    queryset = Arch.objects.all()
+    queryset = Arch.objects.all().order_by('id')
     lookup_field = 'name'
 
     def list(self, request, *args, **kwargs):
@@ -302,7 +289,7 @@ class SigKeyViewSet(pdc_viewsets.StrictQueryParamMixin,
     browsers, such as ``RESTClient``, ``RESTConsole``.
     """
     serializer_class = SigKeySerializer
-    queryset = SigKey.objects.all()
+    queryset = SigKey.objects.all().order_by('id')
     filter_class = SigKeyFilter
     lookup_field = 'key_id'
 
@@ -381,3 +368,11 @@ class SigKeyViewSet(pdc_viewsets.StrictQueryParamMixin,
 
 def home(request):
     return render(request, "home/index.html")
+
+
+def handle404(request):
+    if 'application/json' in request.META.get('HTTP_ACCEPT', ''):
+        return HttpResponse(json.dumps(handlers.NOT_FOUND_JSON_RESPONSE),
+                            status=status.HTTP_404_NOT_FOUND,
+                            content_type='application/json')
+    return defaults.page_not_found(request)

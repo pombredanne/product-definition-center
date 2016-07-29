@@ -18,3 +18,12 @@ DEVEL_CONTACT = 'Devel_Owner'
 
 # Arch type
 ARCH_SRC = 'src'
+
+# PDC warning field in response header
+PDC_WARNING_HEADER_NAME = 'pdc-warning'
+
+# Warning when using put method on optional parameter
+PUT_OPTIONAL_PARAM_WARNING = {
+    'PUT_OPTIONAL_PARAM_WARNING': 'When using the `PUT` method, if an optional field is not specified' +
+                                  ' in the input, it will be erased.',
+}

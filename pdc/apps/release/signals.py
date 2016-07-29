@@ -24,6 +24,12 @@ release_clone = dispatch.Signal(providing_args=['request',
                                                 'original_release',
                                                 'release'])
 
+# This signal is sent when want to clone components from one release to another.
+# The way is to copy all release components, component groups and relationships.
+rpc_release_clone_component = dispatch.Signal(providing_args=['request',
+                                                              'original_release',
+                                                              'release'])
+
 # This signal is sent before validated data is converted into a Release
 # instance. Any module that has additional fields in the dict should remove it
 # and store it for further processing.
@@ -34,3 +40,13 @@ release_serializer_post_create = dispatch.Signal(providing_args=['release'])
 
 # This signal is sent after an existing release is updated.
 release_serializer_post_update = dispatch.Signal(providing_args=['release'])
+
+# This signal is sent before a product object is updated. The argument contains
+# the original value.
+product_pre_update = dispatch.Signal(providing_args=['request', 'product'])
+
+# This signal is sent after a product object is updated in the database. This
+# might be as a result of update call (in which case the `product_pre_update`
+# signal was sent before this) or after creating a completely new product (no
+# `product_pre_update` in this case).
+product_post_update = dispatch.Signal(providing_args=['request', 'product'])

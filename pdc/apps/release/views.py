@@ -8,30 +8,36 @@ import json
 from django.shortcuts import render, get_object_or_404
 from django.conf import settings
 from kobo.django.views.generic import DetailView, SearchView
+from rest_framework.reverse import reverse
 from rest_framework import viewsets, mixins, status
 from rest_framework.response import Response
-
+from django.http import Http404
 from . import filters
 from . import signals
 from . import models
 from .forms import (ReleaseSearchForm, BaseProductSearchForm,
                     ProductSearchForm, ProductVersionSearchForm)
+from .models import ProductVersion, Release, BaseProduct, Variant, Product
 from .serializers import (ProductSerializer, ProductVersionSerializer,
                           ReleaseSerializer, BaseProductSerializer,
                           ReleaseTypeSerializer, ReleaseVariantSerializer,
-                          VariantTypeSerializer)
+                          VariantTypeSerializer, ReleaseGroupSerializer)
+from pdc.apps.compose import models as compose_models
 from pdc.apps.repository import models as repo_models
+from pdc.apps.common.constants import PUT_OPTIONAL_PARAM_WARNING
 from pdc.apps.common.viewsets import (ChangeSetModelMixin,
                                       ChangeSetCreateModelMixin,
                                       ChangeSetUpdateModelMixin,
                                       MultiLookupFieldMixin,
-                                      StrictQueryParamMixin)
+                                      StrictQueryParamMixin,
+                                      ConditionalProcessingMixin)
+from pdc.apps.auth.permissions import APIPermission
 from . import lib
 
 
 class ReleaseListView(SearchView):
     form_class = ReleaseSearchForm
-    queryset = models.Release.objects.select_related('release_type', 'product_version', 'base_product').order_by('id')
+    queryset = models.Release.objects.select_related('release_type', 'product_version', 'base_product')
     allow_empty = True
     template_name = "release_list.html"
     context_object_name = "release_list"
@@ -56,7 +62,7 @@ class ReleaseDetailView(DetailView):
 
 class BaseProductListView(SearchView):
     form_class = BaseProductSearchForm
-    queryset = models.BaseProduct.objects.all().order_by('id')
+    queryset = models.BaseProduct.objects.all()
     allow_empty = True
     template_name = "base_product_list.html"
     context_object_name = "base_product_list"
@@ -79,7 +85,7 @@ class BaseProductDetailView(DetailView):
 
 class ProductListView(SearchView):
     form_class = ProductSearchForm
-    queryset = models.Product.objects.prefetch_related('productversion_set__release_set').order_by('id')
+    queryset = models.Product.objects.prefetch_related('productversion_set__release_set')
     allow_empty = True
     template_name = "product_list.html"
     context_object_name = "product_list"
@@ -95,6 +101,7 @@ class ProductDetailView(DetailView):
 
 class ProductViewSet(ChangeSetCreateModelMixin,
                      ChangeSetUpdateModelMixin,
+                     ConditionalProcessingMixin,
                      StrictQueryParamMixin,
                      mixins.RetrieveModelMixin,
                      mixins.ListModelMixin,
@@ -106,12 +113,14 @@ class ProductViewSet(ChangeSetCreateModelMixin,
     the form of `product_version_id` (both in requests and responses).
     """
 
-    queryset = models.Product.objects.prefetch_related('productversion_set').order_by('id')
+    queryset = models.Product.objects.prefetch_related('productversion_set')
     serializer_class = ProductSerializer
     lookup_field = 'short'
     filter_class = filters.ProductFilter
+    permission_classes = (APIPermission,)
+    related_model_classes = (Product, ProductVersion)
 
-    def create(self, *args, **kwargs):
+    def create(self, request, *args, **kwargs):
         """
         __Method__: POST
 
@@ -125,7 +134,12 @@ class ProductViewSet(ChangeSetCreateModelMixin,
 
         %(SERIALIZER)s
         """
-        return super(ProductViewSet, self).create(*args, **kwargs)
+        response = super(ProductViewSet, self).create(request, *args, **kwargs)
+        if response.status_code == status.HTTP_201_CREATED:
+            signals.product_post_update.send(sender=self.object.__class__,
+                                             product=self.object,
+                                             request=request)
+        return response
 
     def retrieve(self, *args, **kwargs):
         """
@@ -155,7 +169,7 @@ class ProductViewSet(ChangeSetCreateModelMixin,
         """
         return super(ProductViewSet, self).list(*args, **kwargs)
 
-    def update(self, *args, **kwargs):
+    def update(self, request, *args, **kwargs):
         """
         __Method__: PUT, PATCH
 
@@ -173,7 +187,12 @@ class ProductViewSet(ChangeSetCreateModelMixin,
 
         %(SERIALIZER)s
         """
-        return super(ProductViewSet, self).update(*args, **kwargs)
+        obj = self.get_object()
+        signals.product_pre_update.send(sender=obj.__class__, product=obj, request=request)
+        response = super(ProductViewSet, self).update(request, *args, **kwargs)
+        if response.status_code == status.HTTP_200_OK:
+            signals.product_post_update.send(sender=obj.__class__, product=self.object, request=request)
+        return response
 
 
 class ProductVersionViewSet(ChangeSetCreateModelMixin,
@@ -189,11 +208,12 @@ class ProductVersionViewSet(ChangeSetCreateModelMixin,
     `short` name. Similarly releases are referenced by `release_id`. This
     applies to both requests and responses.
     """
-    queryset = models.ProductVersion.objects.select_related('product').prefetch_related('release_set').order_by('id')
+    queryset = models.ProductVersion.objects.select_related('product').prefetch_related('release_set')
     serializer_class = ProductVersionSerializer
     lookup_field = 'product_version_id'
     lookup_value_regex = '[^/]+'
     filter_class = filters.ProductVersionFilter
+    permission_classes = (APIPermission,)
 
     def create(self, *args, **kwargs):
         """
@@ -271,6 +291,7 @@ class ProductVersionViewSet(ChangeSetCreateModelMixin,
 
 class ReleaseViewSet(ChangeSetCreateModelMixin,
                      ChangeSetUpdateModelMixin,
+                     ConditionalProcessingMixin,
                      StrictQueryParamMixin,
                      mixins.ListModelMixin,
                      mixins.RetrieveModelMixin,
@@ -294,6 +315,9 @@ class ReleaseViewSet(ChangeSetCreateModelMixin,
     lookup_field = 'release_id'
     lookup_value_regex = '[^/]+'
     filter_class = filters.ReleaseFilter
+    permission_classes = (APIPermission,)
+    docstring_macros = PUT_OPTIONAL_PARAM_WARNING
+    related_model_classes = (Release, BaseProduct, ProductVersion)
 
     def filter_queryset(self, qs):
         """
@@ -376,8 +400,7 @@ class ReleaseViewSet(ChangeSetCreateModelMixin,
         """
         This end-point allows updating a release.
 
-        When using the `PUT` method, if an optional field is not specified in
-        the input, it will be erased.
+        %(PUT_OPTIONAL_PARAM_WARNING)s
 
         This applies also to Bugzilla and DistGit mapping: if it is not specified,
         it will be cleared.
@@ -410,6 +433,7 @@ class ReleaseViewSet(ChangeSetCreateModelMixin,
 
 class ReleaseImportView(StrictQueryParamMixin, viewsets.GenericViewSet):
     queryset = models.Release.objects.none()   # Required for permissions
+    permission_classes = (APIPermission,)
 
     def create(self, request):
         """
@@ -436,6 +460,11 @@ class ReleaseImportView(StrictQueryParamMixin, viewsets.GenericViewSet):
         formatting of the file is not important for PDC, and it is possible to
         significantly minimize size of the file by removing indentation)
 
+        __Response__:
+            {
+                "url": string
+            }
+
         __Example__:
 
             $ curl -H 'Content-Type: application/json' -X POST -d @/path/to/composeinfo.json \\
@@ -443,8 +472,9 @@ class ReleaseImportView(StrictQueryParamMixin, viewsets.GenericViewSet):
         """
         if not request.data:
             return Response(status=status.HTTP_400_BAD_REQUEST, data={'detail': 'Missing composeinfo'})
-        lib.release__import_from_composeinfo(request, request.data)
-        return Response(status=status.HTTP_201_CREATED)
+        release_obj = lib.release__import_from_composeinfo(request, request.data)
+        url = reverse('release-detail', args=[release_obj])
+        return Response({'url': url}, status=status.HTTP_201_CREATED)
 
 
 class BaseProductViewSet(ChangeSetCreateModelMixin,
@@ -456,11 +486,12 @@ class BaseProductViewSet(ChangeSetCreateModelMixin,
     """
     An API endpoint providing access to base products.
     """
-    queryset = models.BaseProduct.objects.all().order_by('id')
+    queryset = models.BaseProduct.objects.all()
     serializer_class = BaseProductSerializer
+    permission_classes = (APIPermission,)
     lookup_field = 'base_product_id'
     lookup_value_regex = '[^/]+'
-    filter_fields = ('base_product_id', 'name', 'short', 'version')
+    filter_class = filters.BaseProductFilter
 
     def create(self, *args, **kwargs):
         """
@@ -525,7 +556,7 @@ class BaseProductViewSet(ChangeSetCreateModelMixin,
 
 class ProductVersionListView(SearchView):
     form_class = ProductVersionSearchForm
-    queryset = models.ProductVersion.objects.prefetch_related('release_set').order_by('id')
+    queryset = models.ProductVersion.objects.prefetch_related('release_set')
     allow_empty = True
     template_name = "product_version_list.html"
     context_object_name = "product_version_list"
@@ -544,6 +575,7 @@ def product_pages(request):
 
 
 class ReleaseCloneViewSet(StrictQueryParamMixin, viewsets.GenericViewSet):
+    permission_classes = (APIPermission,)
     queryset = models.Release.objects.none()   # Required for permissions
 
     def create(self, request):
@@ -632,9 +664,86 @@ class ReleaseCloneViewSet(StrictQueryParamMixin, viewsets.GenericViewSet):
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
+class ReleaseComponentCloneViewSet(StrictQueryParamMixin, viewsets.GenericViewSet):
+    permission_classes = (APIPermission,)
+    queryset = models.Release.objects.none()
+
+    def create(self, request):
+        """
+        Clone all release components, component groups and relationships from one Release
+        to another Release, both they are existed.
+
+        __Method__: POST
+
+        __URL__: $LINK:releasecomponentclone-list$
+
+        __Data__:
+
+            {
+                "source_release_id":            string,
+                "target_release_id":            string
+                "component_dist_git_branch":    string,     # optional
+                "include_inactive":             bool,       # optional
+            }
+
+        __Response__:
+
+            {
+            "url": [the link for target release component]
+            }
+
+        Please make sure source release contains components,
+        cloning source release without components doesn't make much sense.
+
+        If `component_dist_git_branch` is present, the value will be set for all
+        release components under the target release. If missing, release
+        components will be cloned without changes.
+
+        If `include_inactive` is False, the inactive release_components belong to
+        the old release won't be cloned to target release.
+        Default it will clone all release_components to target release.
+        """
+        data = request.data
+        if 'source_release_id' not in data:
+            return Response({'detail': 'Missing source_release_id'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        source_release_id = data.pop('source_release_id')
+        if 'target_release_id' not in data:
+            return Response({'detail': 'Missing target_release_id'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        target_release_id = data.pop('target_release_id')
+        try:
+            source_release = get_object_or_404(models.Release, release_id=source_release_id)
+        except Http404:
+            return Response({'detail': 'Source_release %s is not existed' % source_release_id},
+                            status=status.HTTP_404_NOT_FOUND)
+        try:
+            target_release = get_object_or_404(models.Release, release_id=target_release_id)
+        except Http404:
+            return Response({'detail': 'Target_release %s is not existed' % target_release_id},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        if source_release.releasecomponent_set.count() == 0:
+            return Response({'detail': 'there is no component in source release'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not target_release.active:
+            return Response({'detail': 'can\'t clone components ' +
+                                       'to an inactive target release %s' % target_release_id},
+                            status=status.HTTP_400_BAD_REQUEST)
+        filter_release = "?release=" + target_release_id
+        target_url = reverse(viewname='releasecomponent-list', request=request) + filter_release
+        signals.rpc_release_clone_component.send(sender=target_release.__class__,
+                                                 request=request,
+                                                 original_release=source_release,
+                                                 release=target_release)
+
+        return Response({'url': target_url}, status=status.HTTP_201_CREATED)
+
+
 class ReleaseRPMMappingView(StrictQueryParamMixin, viewsets.GenericViewSet):
     lookup_field = 'package'
     queryset = models.Release.objects.none()   # Required for permissions
+    permission_classes = (APIPermission,)
     extra_query_params = ['disable_overrides']
 
     def retrieve(self, request, **kwargs):
@@ -648,7 +757,8 @@ class ReleaseRPMMappingView(StrictQueryParamMixin, viewsets.GenericViewSet):
 
         The latest compose is chosen from the list of composes built for the
         release or linked to it. The RPM mapping of that compose is filtered to
-        only include variants and architectures listed for the release.
+        only include variants and architectures listed for the release. If the
+        release has no compose then take an empty dict as compose RPM mapping.
 
         The used overrides come from the release specified in the URL, not the
         one for which the compose was originally built for.
@@ -656,7 +766,6 @@ class ReleaseRPMMappingView(StrictQueryParamMixin, viewsets.GenericViewSet):
         Following cases result in response of `404 NOT FOUND`:
 
          * no release with given id
-         * release exists, but has no composes
          * release and compose exists, but there are no RPMs for the package
 
         __Response__:
@@ -667,22 +776,30 @@ class ReleaseRPMMappingView(StrictQueryParamMixin, viewsets.GenericViewSet):
             }
 
         The `compose` key contains compose id of the compose used to populate
-        the mapping.
+        the mapping. If the release has no compose, 'compose' is null.
         """
         release = get_object_or_404(models.Release, release_id=kwargs['release_id'])
         compose = release.get_latest_compose()
-        if not compose:
-            return Response(status=status.HTTP_404_NOT_FOUND,
-                            data={'detail': 'Release %s has no composes' % kwargs['release_id']})
-        mapping, _ = compose.get_rpm_mapping(kwargs['package'],
-                                             bool(request.query_params.get('disable_overrides', False)),
-                                             release=release)
-        result = mapping.get_pure_dict()
-        if not result:
-            return Response(status=status.HTTP_404_NOT_FOUND,
-                            data={'detail': 'Package %s not present in release %s'
-                                  % (kwargs['package'], kwargs['release_id'])})
-        return Response(data={'compose': compose.compose_id, 'mapping': result})
+        if compose:
+            mapping, _ = compose.get_rpm_mapping(kwargs['package'],
+                                                 bool(request.query_params.get('disable_overrides', False)),
+                                                 release=release)
+            result = mapping.get_pure_dict()
+            if result:
+                return Response(data={'compose': compose.compose_id, 'mapping': result})
+        else:
+            mapping = compose_models.ComposeRPMMapping()
+            mapping.get_rpm_mapping_only_with_overrides(kwargs['package'],
+                                                        bool(request.query_params.get('disable_overrides', False)),
+                                                        release=release)
+            result = mapping.get_pure_dict()
+            if result:
+                return Response(data={'compose': None, 'mapping': result})
+
+        # no result
+        return Response(status=status.HTTP_404_NOT_FOUND,
+                        data={'detail': 'Package %s not present in release %s'
+                                        % (kwargs['package'], kwargs['release_id'])})
 
 
 class ReleaseTypeViewSet(StrictQueryParamMixin,
@@ -700,9 +817,10 @@ class ReleaseTypeViewSet(StrictQueryParamMixin,
     -d _data_ (a json string). or GUI plugins for
     browsers, such as ``RESTClient``, ``RESTConsole``.
     """
-    queryset = models.ReleaseType.objects.all().order_by('id')
+    queryset = models.ReleaseType.objects.all()
     serializer_class = ReleaseTypeSerializer
     filter_class = filters.ReleaseTypeFilter
+    permission_classes = (APIPermission,)
 
     def list(self, request, *args, **kwargs):
         """
@@ -739,6 +857,7 @@ class ReleaseTypeViewSet(StrictQueryParamMixin,
 
 
 class ReleaseVariantViewSet(ChangeSetModelMixin,
+                            ConditionalProcessingMixin,
                             StrictQueryParamMixin,
                             MultiLookupFieldMixin,
                             viewsets.GenericViewSet):
@@ -748,10 +867,12 @@ class ReleaseVariantViewSet(ChangeSetModelMixin,
     `release_id/variant_uid` is used in URL for retrieving, updating or
     deleting a single variant as well as in bulk operations.
     """
-    queryset = models.Variant.objects.all().order_by('id')
+    queryset = models.Variant.objects.all()
     serializer_class = ReleaseVariantSerializer
     filter_class = filters.ReleaseVariantFilter
+    permission_classes = (APIPermission,)
     lookup_fields = (('release__release_id', r'[^/]+'), ('variant_uid', r'[^/]+'))
+    related_model_classes = (Variant, Release)
 
     def create(self, *args, **kwargs):
         """
@@ -766,7 +887,7 @@ class ReleaseVariantViewSet(ChangeSetModelMixin,
         All fields are required. The required architectures must already be
         present in PDC.
 
-        *type*: $LINK:varianttype-list$
+        *type*: $LINK:releasevarianttype-list$
 
         __Response__:
 
@@ -792,7 +913,7 @@ class ReleaseVariantViewSet(ChangeSetModelMixin,
         repositories are connected to some Variant.Arch pair and it is not
         possible to remove an arch with any repositories..
 
-        *type*: $LINK:varianttype-list$
+        *type*: $LINK:releasevarianttype-list$
 
         __Response__:
 
@@ -880,20 +1001,125 @@ class ReleaseVariantViewSet(ChangeSetModelMixin,
 class VariantTypeViewSet(StrictQueryParamMixin,
                          mixins.ListModelMixin,
                          viewsets.GenericViewSet):
+    # TODO: remove this class after next release
+    serializer_class = VariantTypeSerializer
+    queryset = models.VariantType.objects.all().order_by('id')
+    permission_classes = (APIPermission,)
+
+    def list(self, request, *args, **kwargs):
+        """
+        This end-point is deprecated. Use $LINK:releasevarianttype-list$ instead.
+        """
+        return super(VariantTypeViewSet, self).list(request, *args, **kwargs)
+
+
+class ReleaseVariantTypeViewSet(StrictQueryParamMixin,
+                                mixins.ListModelMixin,
+                                viewsets.GenericViewSet):
     """
     API endpoint that allows variant_types to be viewed.
     """
     serializer_class = VariantTypeSerializer
-    queryset = models.VariantType.objects.all().order_by('id')
+    queryset = models.VariantType.objects.all()
+    permission_classes = (APIPermission,)
 
     def list(self, request, *args, **kwargs):
         """
         __Method__: GET
 
-        __URL__: $LINK:varianttype-list$
+        __URL__: $LINK:releasevarianttype-list$
 
         __Response__:
 
         %(SERIALIZER)s
         """
-        return super(VariantTypeViewSet, self).list(request, *args, **kwargs)
+        return super(ReleaseVariantTypeViewSet, self).list(request, *args, **kwargs)
+
+
+class ReleaseGroupsViewSet(ChangeSetModelMixin,
+                           StrictQueryParamMixin,
+                           viewsets.GenericViewSet):
+    """
+    API endpoint that allows release_group_types to be viewed or edited.
+    This API endpoint is experimental.
+    """
+
+    queryset = models.ReleaseGroup.objects.all()
+    serializer_class = ReleaseGroupSerializer
+    lookup_field = 'name'
+    lookup_value_regex = '[^/]+'
+    filter_class = filters.ReleaseGroupFilter
+    permission_classes = (APIPermission,)
+
+    def create(self, request, *args, **kwargs):
+        """
+        __Method__: POST
+
+        __URL__: $LINK:releasegroups-list$
+
+        __Data__:
+
+        %(WRITABLE_SERIALIZER)s
+
+        __Response__:
+
+        %(SERIALIZER)s
+        """
+
+        return super(ReleaseGroupsViewSet, self).create(request, *args, **kwargs)
+
+    def retrieve(self, request, *args, **kwargs):
+        """
+        __Method__: GET
+
+        __URL__: $LINK:releasegroups-detail:name$
+
+        __Response__:
+
+        %(SERIALIZER)s
+        """
+        return super(ReleaseGroupsViewSet, self).retrieve(request, *args, **kwargs)
+
+    def list(self, *args, **kwargs):
+        """
+        __Method__: GET
+
+        __URL__: $LINK:releasegroups-list$
+
+        __Query params__:
+
+        %(FILTERS)s
+
+        __Response__: a paged list of following objects
+
+        %(SERIALIZER)s
+        """
+        return super(ReleaseGroupsViewSet, self).list(*args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        """
+        __Method__: PUT, PATCH
+
+        __URL__: $LINK:releasegroups-detail:name$
+
+        __Data__:
+
+        %(WRITABLE_SERIALIZER)s
+
+        __Response__:
+
+        %(SERIALIZER)s
+        """
+        return super(ReleaseGroupsViewSet, self).update(request, *args, **kwargs)
+
+    def destroy(self, *args, **kwargs):
+        """
+        __Method__: `DELETE`
+
+        __URL__: $LINK:releasegroups-detail:name$
+
+        __Response__:
+
+        On success, HTTP status code is 204 and the response has no content.
+        """
+        return super(ReleaseGroupsViewSet, self).destroy(*args, **kwargs)

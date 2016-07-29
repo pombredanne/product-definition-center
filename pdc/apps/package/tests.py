@@ -559,7 +559,7 @@ class RPMDepsAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
     def test_create_rpm_with_deps(self):
         data = {'name': 'fake_bash', 'version': '1.2.3', 'epoch': 0,
                 'release': '4.b1', 'arch': 'x86_64', 'srpm_name': 'bash',
-                'filename': 'bash-1.2.3-4.b1.x86_64.rpm',
+                'filename': 'bash-1.2.3-4.b1.x86_64.rpm', "built_for_release": None,
                 'linked_releases': [], 'srpm_nevra': 'fake_bash-0:1.2.3-4.b1.src',
                 'dependencies': {'requires': ['required-package'],
                                  'obsoletes': ['obsolete-package'],
@@ -752,8 +752,8 @@ class RPMDepsAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
 class RPMAPIRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
     fixtures = [
         'pdc/apps/common/fixtures/test/sigkey.json',
-        'pdc/apps/release/fixtures/tests/release.json',
-        'pdc/apps/package/fixtures/test/rpm.json',
+        'pdc/apps/package/fixtures/test/release.json',
+        'pdc/apps/package/fixtures/test/rpm2.json',
         'pdc/apps/compose/fixtures/tests/compose.json',
         'pdc/apps/compose/fixtures/tests/compose_composerpm.json',
         'pdc/apps/compose/fixtures/tests/variant_arch.json',
@@ -772,7 +772,7 @@ class RPMAPIRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
 
     def test_query_with_params(self):
         url = reverse('rpms-list')
-        response = self.client.get(url + '?name=bash', format='json')
+        response = self.client.get(url + '?name=^bash$', format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data.get('count'), 1)
         response = self.client.get(url + '?epoch=0', format='json')
@@ -806,9 +806,63 @@ class RPMAPIRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
             ids.append(result['id'])
         self.assertTrue(1 in ids)
 
+    def test_query_name_with_regexp(self):
+        url = reverse('rpms-list')
+        response = self.client.get(url + '?name=bash', format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 3)
+
+        response = self.client.get(url + '?name=bash.*', format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 3)
+
+        response = self.client.get(url + '?name=bash-doc', format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 1)
+
+        response = self.client.get(url + '?name=doc', format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 1)
+
+        response = self.client.get(url + '?name=doc$', format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 1)
+
+        response = self.client.get(url + '?name=bash&name=bash-other', format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 3)
+
+        response = self.client.get(url + '?name=bash-doc&name=bash-other', format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 2)
+
+        response = self.client.get(url + '?name=doc$&name=^other', format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 1)
+
+        response = self.client.get(url + '?name=bash%2B', format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 3)
+
+        response = self.client.get(url + '?name=bashh%2B&name=bash-', format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 2)
+
+        response = self.client.get(url + '?name=bash.%2B', format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 2)
+
+        response = self.client.get(url + '?name=bashh%2BB&name=nothatname', format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 0)
+
+        response = self.client.get(url + '?name=bashh*&name=nothatname', format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 3)
+
     def test_query_with_multi_value_against_same_key(self):
         url = reverse('rpms-list')
-        response = self.client.get(url + '?name=bash&name=bash-doc', format='json')
+        response = self.client.get(url + '?name=^bash$&name=^bash-doc$', format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data.get('count'), 2)
         response = self.client.get(url + '?srpm_nevra=bash-0:1.2.3-4.b1.src&srpm_nevra=bash-0:1.2.3-4.b2.src',
@@ -818,7 +872,7 @@ class RPMAPIRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
 
     def test_query_with_different_key(self):
         url = reverse('rpms-list')
-        response = self.client.get(url + '?name=bash&version=1.2.3', format='json')
+        response = self.client.get(url + '?name=^bash$&version=1.2.3', format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data.get('count'), 1)
 
@@ -855,6 +909,7 @@ class RPMAPIRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
                        "arch": "x86_64",
                        "srpm_name": "bash", "srpm_nevra": "bash-0:1.2.3-4.b1.src",
                        "filename": "bash-1.2.3-4.b1.x86_64.rpm", "linked_releases": [],
+                       "built_for_release": "release-1.0",
                        "linked_composes": ["compose-1"], "dependencies": self.empty_deps}
         self.assertEqual(response.data, expect_data)
 
@@ -874,7 +929,22 @@ class RPMAPIRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
                                   "name": "fake_bash", "version": "1.2.3", "epoch": 0, "release": "4.b1",
                                   "arch": "x86_64", "srpm_name": "bash", "filename": "bash-1.2.3-4.b1.x86_64.rpm",
                                   "linked_releases": ['release-1.0'], "srpm_nevra": "fake_bash-0:1.2.3-4.b1.src",
-                                  "dependencies": self.empty_deps}
+                                  "built_for_release": None, "dependencies": self.empty_deps}
+        self.assertEqual(response.data, expected_response_data)
+        self.assertNumChanges([1])
+
+    def test_create_rpm_with_built_for_release(self):
+        url = reverse('rpms-list')
+        data = {"name": "fake_bash", "version": "1.2.3", "epoch": 0, "release": "4.b1", "arch": "x86_64",
+                "srpm_name": "bash", "filename": "bash-1.2.3-4.b1.x86_64.rpm", "linked_releases": ['release-1.0'],
+                "srpm_nevra": "fake_bash-0:1.2.3-4.b1.src", "built_for_release": "release-1.0"}
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        expected_response_data = {"id": 4, 'linked_composes': [],
+                                  "name": "fake_bash", "version": "1.2.3", "epoch": 0, "release": "4.b1",
+                                  "arch": "x86_64", "srpm_name": "bash", "filename": "bash-1.2.3-4.b1.x86_64.rpm",
+                                  "linked_releases": ['release-1.0'], "srpm_nevra": "fake_bash-0:1.2.3-4.b1.src",
+                                  "built_for_release": "release-1.0", "dependencies": self.empty_deps}
         self.assertEqual(response.data, expected_response_data)
         self.assertNumChanges([1])
 
@@ -925,10 +995,17 @@ class RPMAPIRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         response = self.client.patch(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_partial_update_rpm_with_built_for_release(self):
+        url = reverse('rpms-detail', args=[1])
+        data = {"built_for_release": "release-2.0"}
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNumChanges([1])
+
     def test_update_rpm(self):
         data = {"name": "fake_bash", "version": "1.2.3", "epoch": 0, "release": "4.b1", "arch": "x86_64",
                 "srpm_name": "bash", "filename": "bash-1.2.3-4.b1.x86_64.rpm", "linked_releases": ['release-1.0'],
-                "srpm_nevra": "fake_bash-0:1.2.3-4.b1.src"}
+                "srpm_nevra": "fake_bash-0:1.2.3-4.b1.src", "built_for_release": 'release-2.0'}
         url = reverse('rpms-detail', args=[1])
         response = self.client.put(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -961,6 +1038,35 @@ class RPMAPIRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         response = self.client.delete(url, [1, 2], format='json')
         self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
+    def test_filter_with_built_for_release(self):
+        url = reverse('rpms-list')
+        response = self.client.get(url + '?built_for_release=release-2.0', format='json')
+        count = response.data['count']
+        self.assertEqual(count, 1)
+
+        response = self.client.get(url + '?built_for_release=release-1.0', format='json')
+        count = response.data['count']
+        self.assertEqual(count, 1)
+
+    def test_update_missing_optional_fields_are_erased(self):
+        url = reverse('rpms-list')
+        data = {"name": "fake_bash", "version": "1.2.3", "epoch": 0, "release": "4.b1", "arch": "x86_64",
+                "srpm_name": "bash", "filename": "bash-1.2.3-4.b1.x86_64.rpm", "linked_releases": ['release-1.0'],
+                "srpm_nevra": "fake_bash-0:1.2.3-4.b1.src", "built_for_release": 'release-2.0'}
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        data = {"name": "fake_bash", "version": "1.2.3", "epoch": 0, "release": "4.b1", "arch": "x86_64",
+                "srpm_name": "bash", "srpm_nevra": "fake_bash-0:1.2.3-4.b1.src"}
+        url = reverse('rpms-detail', args=[4])
+        response = self.client.put(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['linked_releases'], [])
+        self.assertEqual(response.data['built_for_release'], None)
+        self.assertEqual(response.data['dependencies'], {"recommends": [], "suggests": [], "obsoletes": [],
+                                                         "provides": [], "conflicts": [], "requires": []})
+        self.assertEqual(response.data['filename'], 'fake_bash-1.2.3-4.b1.x86_64.rpm')
+        self.assertNumChanges([1, 1])
+
 
 class ImageRESTTestCase(APITestCase):
     fixtures = [
@@ -985,6 +1091,23 @@ class ImageRESTTestCase(APITestCase):
                                    {'file_name': ['image-1', 'image-2']})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data.get('count'), 2)
+
+    def test_query_subvariant(self):
+        response = self.client.get(reverse('image-list'), {'subvariant': 'subvariant_1'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 1)
+
+        response = self.client.get(reverse('image-list'), {'subvariant': ['subvariant_1', 'subvariant_2']})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 2)
+
+        response = self.client.get(reverse('image-list'), {'subvariant': 'subvariant_not_exist'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('count'), 0)
+
+    def test_output_include_subvariant(self):
+        response = self.client.get(reverse('image-list'), {'subvariant': 'subvariant_1'})
+        self.assertTrue('subvariant' in response.data['results'][0])
 
     def test_query_image_format(self):
         response = self.client.get(reverse('image-list'), {'image_format': 'iso'})
@@ -1048,6 +1171,10 @@ class ImageRESTTestCase(APITestCase):
         response = self.client.get(reverse('image-list'), {'bootable': True})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data.get('count'), 1)
+
+    def test_query_bootable_with_illegal_boolean_value(self):
+        response = self.client.get(reverse('image-list'), {'bootable': 'wrong_value'})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_negative_bootable(self):
         response = self.client.get(reverse('image-list'), {'bootable': 'false'})
@@ -1140,6 +1267,10 @@ class ImageRESTTestCase(APITestCase):
         response = self.client.get(reverse('image-list'), {key: value})
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data, {"detail": [u'Value [%s] of %s is not an integer' % (value, key)]})
+
+    def test_subvariant_default_empty_string(self):
+        image = models.Image.objects.get(file_name='image-3')
+        self.assertEqual(image.subvariant, '')
 
 
 class BuildImageRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
@@ -1546,3 +1677,193 @@ class BuildImageRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         response = self.client.get(url, format='json')
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertNumChanges([1])
+
+    def test_create_same_image_id_with_different_format(self):
+        url = reverse('buildimage-list')
+        data = {'image_id': 'new_build',
+                'image_format': 'docker',
+                'md5': "0123456789abcdef0123456789abcdef",
+                'rpms': [{'name': 'new_rpm', 'epoch': 0, 'version': '1.0.0',
+                          'release': '1', 'arch': 'src', 'srpm_name': 'new_srpm'}]
+                }
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        url = reverse('buildimage-list')
+        data = {'image_id': 'new_build',
+                'image_format': 'iso',
+                'md5': "0123456789abcdef0123456789abcabc",
+                'rpms': [{'name': 'new_rpm', 'epoch': 0, 'version': '1.0.0',
+                          'release': '1', 'arch': 'src', 'srpm_name': 'new_srpm'}]
+                }
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+
+class BuildImageRTTTestsRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
+    fixtures = [
+        'pdc/apps/package/fixtures/test/rpm.json',
+        'pdc/apps/package/fixtures/test/archive.json',
+        'pdc/apps/package/fixtures/test/release.json',
+        'pdc/apps/package/fixtures/test/build_image.json',
+    ]
+
+    def test_build_image_default_test_result_should_be_untested(self):
+        url = reverse('buildimage-list')
+        response = self.client.get(url, format='json')
+        total_count = response.data['count']
+
+        url = reverse('buildimagertttests-list')
+        response = self.client.get(url + '?test_result=untested', format='json')
+        untested_count = response.data['count']
+        self.assertEqual(total_count, untested_count)
+
+        url = reverse('buildimage-list')
+        data = {'image_id': 'new_build',
+                'image_format': 'docker',
+                'md5': "0123456789abcdef0123456789abcdef",
+                'rpms': [{'name': 'new_rpm', 'epoch': 0, 'version': '1.0.0',
+                          'release': '1', 'arch': 'src', 'srpm_name': 'new_srpm'}]
+                }
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        total_count += 1
+        url = reverse('buildimagertttests-list')
+        response = self.client.get(url + '?test_result=untested', format='json')
+        untested_count = response.data['count']
+        self.assertEqual(total_count, untested_count)
+
+    def test_build_image_test_result_should_not_be_created(self):
+        url = reverse('buildimagertttests-list')
+        data = {'build_nvr': 'fake_nvr', 'format': 'iso', 'test_result': 'untested'}
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.data, {u'detail': u'Method "POST" not allowed.'})
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_build_image_test_result_should_not_be_deleted(self):
+        url = reverse('buildimagertttests-detail', args=['my-server-docker-1.0-27/docker'])
+        response = self.client.delete(url, format='json')
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_filter_build_image_test_results_with_test_result(self):
+        url = reverse('buildimagertttests-list')
+        response = self.client.get(url + '?test_result=untested', format='json')
+        untested_count = response.data['count']
+        self.assertGreater(untested_count, 0)
+
+        url = reverse('buildimagertttests-list')
+        response = self.client.get(url + '?test_result=passed', format='json')
+        untested_count = response.data['count']
+        self.assertEqual(0, untested_count)
+
+        url = reverse('buildimagertttests-list')
+        response = self.client.get(url + '?test_result=failed', format='json')
+        untested_count = response.data['count']
+        self.assertEqual(0, untested_count)
+
+    def test_filter_build_image_test_results_with_format(self):
+        url = reverse('buildimagertttests-list')
+        response = self.client.get(url + '?image_format=docker', format='json')
+        untested_count = response.data['count']
+        self.assertEqual(untested_count, 2)
+
+        response = self.client.get(url + '?image_format=iso', format='json')
+        untested_count = response.data['count']
+        self.assertEqual(0, untested_count)
+
+    def test_filter_build_image_test_results_with_combinations(self):
+        url = reverse('buildimagertttests-list')
+        response = self.client.get(url + '?build_nvr=my-server-docker-1.0-27', format='json')
+        count = response.data['count']
+        self.assertEqual(count, 1)
+
+        response = self.client.get(url + '?build_nvr=fake_nvr', format='json')
+        count = response.data['count']
+        self.assertEqual(count, 0)
+
+        url = reverse('buildimage-list')
+        data = {'image_id': 'my-server-docker-1.0-27',
+                'image_format': 'iso',
+                'md5': "0123456789abcdef0123456789abcdef",
+                'rpms': [{'name': 'new_rpm', 'epoch': 0, 'version': '1.0.0',
+                          'release': '1', 'arch': 'src', 'srpm_name': 'new_srpm'}]
+                }
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        url = reverse('buildimagertttests-list')
+        response = self.client.get(url + '?build_nvr=my-server-docker-1.0-27', format='json')
+        count = response.data['count']
+        self.assertEqual(count, 2)
+
+        response = self.client.get(url + '?build_nvr=my-server-docker-1.0-27&test_result=untested', format='json')
+        count = response.data['count']
+        self.assertEqual(count, 2)
+
+        response = self.client.get(url + '?image_format=docker&build_nvr=my-client-docker', format='json')
+        untested_count = response.data['count']
+        self.assertEqual(1, untested_count)
+
+        response = self.client.get(url + '?build_nvr=my-server-docker-1.0-27&test_result=untested&image_format=iso',
+                                   format='json')
+        count = response.data['count']
+        self.assertEqual(count, 1)
+
+        response = self.client.get(url + '?build_nvr=my-server-docker-1.0-27&test_result=passed', format='json')
+        count = response.data['count']
+        self.assertEqual(count, 0)
+
+    def test_patch_build_image_test_results(self):
+        url = reverse('buildimagertttests-list')
+        response = self.client.get(url + '?test_result=untested', format='json')
+        ori_untested_count = response.data['count']
+        url = reverse('buildimagertttests-detail', args=['my-server-docker-1.0-27/docker'])
+        data = {'test_result': 'passed'}
+        response = self.client.patch(url, data, format='json')
+
+        url = reverse('buildimagertttests-list')
+        response = self.client.get(url + '?test_result=passed', format='json')
+        untested_count = response.data['count']
+        self.assertEqual(1, untested_count)
+
+        url = reverse('buildimagertttests-list')
+        response = self.client.get(url + '?test_result=untested', format='json')
+        new_untested_count = response.data['count']
+        self.assertEqual(new_untested_count, ori_untested_count - 1)
+
+    def test_patch_build_image_test_results_not_allowed_fields(self):
+        data = {'build_nvr': 'fake_nvr', 'format': 'iso', 'test_result': 'untested'}
+        url = reverse('buildimagertttests-detail', args=['my-server-docker-1.0-27/docker'])
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        data = {'format': 'iso', 'test_result': 'untested'}
+        url = reverse('buildimagertttests-detail', args=['my-server-docker-1.0-27/docker'])
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        data = {'build_nvr': 'fake_nvr', 'test_result': 'untested'}
+        url = reverse('buildimagertttests-detail', args=['my-server-docker-1.0-27/docker'])
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        data = {'format': 'iso'}
+        url = reverse('buildimagertttests-detail', args=['my-server-docker-1.0-27/docker'])
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        data = {'build_nvr': 'fake_nvr'}
+        url = reverse('buildimagertttests-detail', args=['my-server-docker-1.0-27/docker'])
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_patch_empty_content_should_not_allowed(self):
+        url = reverse('buildimagertttests-detail', args=['my-server-docker-1.0-27/docker'])
+        response = self.client.patch(url, {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_put_method_should_not_allowed(self):
+        data = {'build_nvr': 'my-server-docker-1.0-27', 'format': 'docker', 'test_result': 'untested'}
+        url = reverse('buildimagertttests-detail', args=['my-server-docker-1.0-27/docker'])
+        response = self.client.put(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)

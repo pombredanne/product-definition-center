@@ -26,22 +26,28 @@ from django.http import Http404
 from contrib.bulk_operations import bulk_operations
 
 from pdc.apps.package.serializers import RPMSerializer
-from pdc.apps.common.models import Arch
+from pdc.apps.common.models import Arch, SigKey
 from pdc.apps.common.hacks import bool_from_native, convert_str_to_bool, as_dict
 from pdc.apps.common.viewsets import (ChangeSetCreateModelMixin,
                                       StrictQueryParamMixin,
                                       NoEmptyPatchMixin,
                                       ChangeSetDestroyModelMixin,
                                       ChangeSetModelMixin,
-                                      MultiLookupFieldMixin)
+                                      MultiLookupFieldMixin,
+                                      ChangeSetUpdateModelMixin)
+
 from pdc.apps.release.models import Release
+from pdc.apps.utils.utils import generate_warning_header_dict
+from pdc.apps.auth.permissions import APIPermission
 from .models import (Compose, VariantArch, Variant, ComposeRPM, OverrideRPM,
                      ComposeImage, ComposeRPMMapping, ComposeAcceptanceTestingState,
                      ComposeTree)
 from .forms import (ComposeSearchForm, ComposeRPMSearchForm, ComposeImageSearchForm,
                     ComposeRPMDisableForm, OverrideRPMForm, VariantArchForm, OverrideRPMActionForm)
-from .serializers import ComposeSerializer, OverrideRPMSerializer, ComposeTreeSerializer
-from .filters import ComposeFilter, OverrideRPMFilter, ComposeTreeFilter
+from .serializers import (ComposeSerializer, OverrideRPMSerializer, ComposeTreeSerializer,
+                          ComposeImageRTTTestSerializer, ComposeTreeRTTTestSerializer)
+from .filters import (ComposeFilter, OverrideRPMFilter, ComposeTreeFilter, ComposeImageRTTTestFilter,
+                      ComposeTreeRTTTestFilter)
 from . import lib
 
 
@@ -162,8 +168,12 @@ class RPMOverrideFormView(View):
         """
         release = Release.objects.get(release_id=release_id)
         self.compose = release.get_latest_compose()
-        mapping, useless = self.compose.get_rpm_mapping(self.request.GET['package'],
-                                                        release=release)
+        if self.compose:
+            mapping, useless = self.compose.get_rpm_mapping(self.request.GET['package'], release=release)
+        else:
+            mapping = ComposeRPMMapping()
+            mapping, useless = mapping.get_rpm_mapping_only_with_overrides(self.request.GET['package'], False,
+                                                                           release=release)
 
         checkboxes = []
         overs = set()
@@ -414,7 +424,6 @@ def _apply_changes(request, release, changes):
 
 class ComposeViewSet(StrictQueryParamMixin,
                      mixins.RetrieveModelMixin,
-                     mixins.ListModelMixin,
                      mixins.UpdateModelMixin,
                      viewsets.GenericViewSet):
     """
@@ -430,12 +439,26 @@ class ComposeViewSet(StrictQueryParamMixin,
     transformed into a URL for obtaining and modifying RPM mapping. The
     template contains a string `{{package}}` which should be replaced with the
     package name you are interested in.
+
+    There is no create API for compose. Composes get created as side-effect
+    of using several other APIs:
+    $LINK:composefullimport-list$
+    $LINK:composerpm-list$
+    $LINK:composeimage-list$
     """
     queryset = Compose.objects.all().order_by('id')
     serializer_class = ComposeSerializer
     filter_class = ComposeFilter
+    filter_fields = ('srpm_name', 'rpm_name', 'rpm_arch', 'rpm_version', 'rpm_release')
+    permission_classes = (APIPermission,)
     lookup_field = 'compose_id'
     lookup_value_regex = '[^/]+'
+    context = {}
+
+    def get_serializer_context(self):
+        context = super(ComposeViewSet, self).get_serializer_context()
+        context.update(self.context)
+        return context
 
     def filter_queryset(self, qs):
         """
@@ -445,10 +468,65 @@ class ComposeViewSet(StrictQueryParamMixin,
         possible to sort unconditionally as get_object() will at some point
         call this method and fail unless it receives a QuerySet instance.)
         """
-        qs = super(ComposeViewSet, self).filter_queryset(qs)
+        qs = super(ComposeViewSet, self).filter_queryset(self._filter_nvras(qs))
         if getattr(self, 'order_queryset', False):
             return sorted(qs)
         return qs
+
+    def _filter_nvras(self, qs):
+        q = Q()
+        query_params = self.request.query_params
+        query_param_rpm_key_mapping = [('rpm_name', 'name'),
+                                       ('srpm_name', 'srpm_name'),
+                                       ('rpm_version', 'version'),
+                                       ('rpm_release', 'release'),
+                                       ('rpm_arch', 'arch')]
+        for query_param, rpm_key in query_param_rpm_key_mapping:
+            rpm_value = query_params.get(query_param, None)
+            s = 'variant__variantarch__composerpm__rpm__' + rpm_key
+            if rpm_value:
+                q &= Q(**{s + '__iexact': rpm_value})
+
+        return qs.filter(q).distinct()
+
+    def _fill_in_cache(self, result_queryset):
+        """
+        Cache some information and put them in context to prevent from getting them one by one
+        for each model object in other places.
+        Currently, it caches compose id to it's corresponding Sigkeys' key id mapping.
+        """
+        variant_id_to_compose_id_dict = {}
+        variant_id_list = []
+        for compose_id, variant_id in Variant.objects.filter(
+                compose__in=result_queryset).values_list("compose__id", "id"):
+            variant_id_to_compose_id_dict[variant_id] = compose_id
+            variant_id_list.append(variant_id)
+
+        compose_id_to_va_id_set = {}
+        variant_arch_id_list = []
+        for variant_id, variant_arch_id in VariantArch.objects.filter(
+                variant__id__in=variant_id_list).values_list('variant__id', 'id'):
+            compose_id_to_va_id_set.setdefault(variant_id_to_compose_id_dict[variant_id], set([])).add(variant_arch_id)
+            variant_arch_id_list.append(variant_arch_id)
+
+        va_id_to_key_id_set = {}
+        for key_id, va_id in SigKey.objects.filter(
+                composerpm__variant_arch__id__in=variant_arch_id_list).values_list(
+                'key_id', 'composerpm__variant_arch__id').distinct():
+            va_id_to_key_id_set.setdefault(va_id, set([])).add(key_id)
+
+        compose_id_to_key_id_cache = {}
+        for compose_id, va_id_set in compose_id_to_va_id_set.iteritems():
+            for va_id in va_id_set:
+                if va_id in va_id_to_key_id_set:
+                    key_id_set = compose_id_to_key_id_cache.setdefault(compose_id, set([]))
+                    key_id_set |= va_id_to_key_id_set[va_id]
+
+        self.context = {'compose_id_to_key_id_cache': compose_id_to_key_id_cache}
+
+    def _add_messaging_info(self, request, info):
+        if hasattr(request._request, '_messagings'):
+            request._request._messagings.append(('.compose', info))
 
     def retrieve(self, *args, **kwargs):
         """
@@ -479,9 +557,25 @@ class ComposeViewSet(StrictQueryParamMixin,
         __Response__: a paged list of following objects
 
         %(SERIALIZER)s
+        Note: Query params 'rpm_name', 'srpm_name', 'rpm_version', 'rpm_release', 'rpm_arch'
+        can be used together which perform AND search. When input multi values for one of these
+        query params, the last one will take effect.
         """
         self.order_queryset = True
-        return super(ComposeViewSet, self).list(*args, **kwargs)
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+
+        result_queryset = queryset
+        if page is not None:
+            result_queryset = page
+        self._fill_in_cache(result_queryset)
+
+        serializer = self.get_serializer(result_queryset, many=True)
+        if page is not None:
+            result = self.get_paginated_response(serializer.data)
+        else:
+            result = Response(serializer.data)
+        return result
 
     def update_arch_testing_status(self, data):
         compose_id = self.kwargs[self.lookup_field]
@@ -518,6 +612,10 @@ class ComposeViewSet(StrictQueryParamMixin,
         if not request.data:
             return NoEmptyPatchMixin.make_response()
 
+        if not isinstance(request.data, dict):
+            return Response(data={"detail": ("The parameters' format for updating is wrong. "
+                                             "Please read API documentation")}, status=status.HTTP_400_BAD_REQUEST)
+
         updatable_keys = set(['acceptance_testing', 'linked_releases', 'rtt_tested_architectures'])
         if set(request.data.keys()) - updatable_keys:
             return Response(status=status.HTTP_400_BAD_REQUEST,
@@ -538,13 +636,10 @@ class ComposeViewSet(StrictQueryParamMixin,
                                   json.dumps({'linked_releases': old_data['linked_releases']}),
                                   json.dumps({'linked_releases': response.data['linked_releases']}))
             # Add message
-            if hasattr(request._request, '_messagings'):
-                request._request._messagings.append(
-                    ('.compose',
-                     json.dumps({'action': 'update',
-                                 'compose_id': self.object.compose_id,
-                                 'from': old_data,
-                                 'to': response.data})))
+            self._add_messaging_info(request, json.dumps({'action': 'update',
+                                                          'compose_id': self.object.compose_id,
+                                                          'from': old_data,
+                                                          'to': response.data}))
         return response
 
     def perform_update(self, serializer):
@@ -581,7 +676,9 @@ class ComposeViewSet(StrictQueryParamMixin,
         If the same release is specified in `linked_release` multiple times, it
         will be saved only once.
 
-        The `rtt_tested_architectures` should be a mapping in the form of
+        __Note__: if you want to just update the `rtt_tested_architectures`,
+        it's easy to update with $LINK:composetreertttests-list$ API.
+        In this API , the `rtt_tested_architectures` should be a mapping in the form of
         `{variant: {arch: status}}`. Whatever is specified will be saved in
         database, trees not mentioned will not be modified. Specifying variant
         or architecture that does not exist will result in error.
@@ -592,8 +689,52 @@ class ComposeViewSet(StrictQueryParamMixin,
         kwargs['partial'] = True
         return self.update(request, *args, **kwargs)
 
+    def destroy(self, request, *args, **kwargs):
+        """
+        It will mark the compose as 'deleted'.
 
-class ComposeRPMView(StrictQueryParamMixin, viewsets.GenericViewSet):
+        __Method__:
+        DELETE
+
+        __URL__: $LINK:compose-detail:compose_id$
+
+        __Response__:
+
+            STATUS: 204 NO CONTENT
+
+        __Example__:
+
+            curl -X DELETE -H "Content-Type: application/json" $URL:compose-detail:1$
+        """
+        instance = self.get_object()
+        if instance.deleted:
+            return Response(status=status.HTTP_204_NO_CONTENT,
+                            headers=generate_warning_header_dict(
+                                "No change. This compose was marked as deleted already."))
+        else:
+            instance.deleted = True
+            instance.save()
+            request.changeset.add('Compose', instance.pk,
+                                  json.dumps({'deleted': False}),
+                                  json.dumps({'deleted': True}))
+            self._add_messaging_info(request, json.dumps({'action': 'delete',
+                                                          'compose_id': instance.compose_id}))
+
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class CheckParametersMixin(object):
+
+    def _check_parameters(self, expected_param_list, real_param_list, error_dict, optional_param_list=[]):
+        for key in set(real_param_list) - set(expected_param_list) - set(optional_param_list):
+            error_dict[key] = ["This field is illegal"]
+
+        for key in set(expected_param_list) - set(real_param_list):
+            error_dict[key] = ["This field is required"]
+
+
+class ComposeRPMView(StrictQueryParamMixin, CheckParametersMixin, viewsets.GenericViewSet):
+    permission_classes = (APIPermission,)
     lookup_field = 'compose_id'
     lookup_value_regex = '[^/]+'
     queryset = ComposeRPM.objects.none()    # Required for permissions
@@ -614,9 +755,18 @@ class ComposeRPMView(StrictQueryParamMixin, viewsets.GenericViewSet):
                 "rpm_manifest": rpm_manifest
             }
 
+        __Response__:
+            {
+                "compose_id": string,
+                "imported rpms": int
+            }
+
         The `composeinfo` and `rpm_manifest` values should be actual JSON
         representation of composeinfo and rpm manifest, as stored in
         `composeinfo.json` and `rpm-manifest.json` files.
+
+        You can use <a href="https://pagure.io/pungi">Pungi</a> to produce
+        `composeinfo.json` and `rpm-manifest.json`.
 
         __Example__:
 
@@ -640,13 +790,12 @@ class ComposeRPMView(StrictQueryParamMixin, viewsets.GenericViewSet):
         """
         data = request.data
         errors = {}
-        for key in ('release_id', 'composeinfo', 'rpm_manifest'):
-            if key not in data:
-                errors[key] = ["This field is required"]
+        fields = ['release_id', 'composeinfo', 'rpm_manifest']
+        self._check_parameters(fields, data.keys(), errors)
         if errors:
             return Response(status=status.HTTP_400_BAD_REQUEST, data=errors)
-        lib.compose__import_rpms(request, data['release_id'], data['composeinfo'], data['rpm_manifest'])
-        return Response(status=status.HTTP_201_CREATED)
+        compose_id, imported_rpms = lib.compose__import_rpms(request, data['release_id'], data['composeinfo'], data['rpm_manifest'])
+        return Response(data={'compose': compose_id, 'imported rpms': imported_rpms}, status=status.HTTP_201_CREATED)
 
     def retrieve(self, request, **kwargs):
         """
@@ -691,6 +840,85 @@ class ComposeRPMView(StrictQueryParamMixin, viewsets.GenericViewSet):
         return Response(manifest.serialize({}))
 
 
+class ComposeFullImportViewSet(StrictQueryParamMixin, CheckParametersMixin, viewsets.GenericViewSet):
+    permission_classes = (APIPermission,)
+    queryset = Compose.objects.none()    # Required for permissions.
+
+    def create(self, request):
+        """
+        Import RPMs, images and set compose tree location.
+
+        __Method__: POST
+
+        __URL__: $LINK:composefullimport-list$
+
+        __Data__:
+
+            {
+                "release_id": string,
+                "composeinfo": composeinfo,
+                "rpm_manifest": rpm_manifest,
+                "image_manifest": image_manifest,
+                "location": string,
+                "url": string,
+                "scheme": string
+            }
+
+        __Response__:
+            {
+                "compose_id": string,
+                "imported rpms": int,
+                "imported images": int,
+                "set_locations": int
+            }
+
+        The `composeinfo`, `rpm_manifest` and `image_manifest`values should be actual JSON
+        representation of composeinfo, rpm manifest and image manifest, as stored in
+        `composeinfo.json`, `rpm-manifest.json` and `image-manifest.json` files.
+        `location`, `url`, `scheme` are used to set compose tree location.
+
+        __Example__:
+
+            $ curl -H 'Content-Type: application/json' -X POST \\
+                -d "{\\"composeinfo\\": $(cat /path/to/composeinfo.json), \\
+                     \\"rpm_manifest\\": $(cat /path/to/rpm-manifest.json), \\
+                     \\"image_manifest\\": $(cat /path/to/image_manifest.json), \\
+                     \\"release_id\\": \\"release-1.0\\", \\"location\\": \\"BOS\\", \\
+                     \\"scheme\\": \\"http\\", \\"url\\": \\"abc.com\\" }" \\
+                $URL:composefullimport-list$
+
+        Note that RPM manifests tend to be too large to supply the data via
+        command line argument and using a temporary file becomes necessary.
+
+            $ { echo -n '{"composeinfo": '; cat /path/to/composeinfo.json
+            > echo -n ', "rpm_manifest": '; cat /path/to/rpm-manifest.json
+            > echo -n ', "image_manifest": '; cat /path/to/image_manifest.json
+            > echo -n ', "release_id": "release-1.0", \"location\": \"BOS\", \"scheme\": \"http\", \"url\": \"abc.com\" }' ; } >post_data.json
+            $ curl -H 'Content-Type: application/json' -X POST -d @post_data.json \\
+                $URL:composefullimport-list$
+
+        You could skip the file and send the data directly to `curl`. In such a
+        case use `-d @-`.
+        """
+        data = request.data
+        errors = {}
+        fields = ['release_id', 'composeinfo', 'rpm_manifest', 'image_manifest', 'location', 'url', 'scheme']
+        self._check_parameters(fields, data.keys(), errors)
+        if errors:
+            return Response(status=status.HTTP_400_BAD_REQUEST, data=errors)
+        compose_id, imported_rpms, imported_images, set_locations = lib.compose__full_import(request,
+                                                                                             data['release_id'],
+                                                                                             data['composeinfo'],
+                                                                                             data['rpm_manifest'],
+                                                                                             data['image_manifest'],
+                                                                                             data['location'],
+                                                                                             data['url'],
+                                                                                             data['scheme'])
+        return Response(data={'compose': compose_id, 'imported rpms': imported_rpms,
+                              'imported images': imported_images, 'set_locations': set_locations},
+                        status=status.HTTP_201_CREATED)
+
+
 class ComposeRPMMappingView(StrictQueryParamMixin,
                             viewsets.GenericViewSet):
     """
@@ -698,6 +926,7 @@ class ComposeRPMMappingView(StrictQueryParamMixin,
     overrides applied in this view (if not suppressed) come from the release
     the compose was built for.
     """
+    permission_classes = (APIPermission,)
     lookup_field = 'package'
     queryset = ComposeRPM.objects.none()    # Required for permissions
     extra_query_params = ('disable_overrides', 'perform')
@@ -705,6 +934,18 @@ class ComposeRPMMappingView(StrictQueryParamMixin,
     def retrieve(self, request, **kwargs):
         """
         __URL__: $LINK:composerpmmapping-detail:compose_id:package$
+
+        __Response__:
+
+            {
+                Variants:{
+                    archs:{
+                        rpm_names:[
+                            rpm_arch,
+                        ]
+                    }
+                }
+            }
 
         Returns a JSON representing the RPM mapping. There is an optional query
         parameter `?disable_overrides=1` which returns the raw mapping not
@@ -725,8 +966,7 @@ class ComposeRPMMappingView(StrictQueryParamMixin,
 
             [
                 {
-                    "action":           <str>,
-                    "release_id":       <str>,
+                    "action":           <str>,      # value should be 'create' or 'delete'
                     "variant":          <str>,
                     "arch":             <str>,
                     "srpm_name":        <str>,
@@ -738,24 +978,85 @@ class ComposeRPMMappingView(StrictQueryParamMixin,
                 }
             ]
         """
+        subset = set(["action", "variant", "arch", "srpm_name", "rpm_name", "rpm_arch",
+                      "comment", "do_not_delete"])
+        field_all = set(["action", "variant", "arch", "srpm_name", "rpm_name", "rpm_arch",
+                         "comment", "do_not_delete", "include"])
+        if not isinstance(request.data, list):
+            return Response(data={"detail": ("Wrong input format")}, status=status.HTTP_400_BAD_REQUEST)
+        for i in request.data:
+            s = set(i) - field_all
+            if s:
+                return Response(data={"detail": ("Fields %s are not valid inputs" % list(s))},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if not subset.issubset(set(i)):
+                return Response(data={"detail": "Not all fields specified"}, status=status.HTTP_400_BAD_REQUEST)
+            if i['action'].lower().strip() == "create" and "include" not in i:
+                return Response(data={"detail": "No field 'include' when 'action' is create"},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if i['action'].lower().strip() == "delete" and "include" in i:
+                return Response(data={"detail": "Field 'include' is only for 'action' being 'create'"},
+                                status=status.HTTP_400_BAD_REQUEST)
         compose = get_object_or_404(Compose, compose_id=kwargs['compose_id'])
         _apply_changes(request, compose.release, request.data)
-        return Response(status=204)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    def _update_parameters_acceptable(self, in_data, layer):
+        result = False
+        if layer == 1:
+            result = isinstance(in_data, list)
+        elif layer > 1:
+            if not isinstance(in_data, dict) or len(in_data) != 1:
+                result = False
+            else:
+                result = self._update_parameters_acceptable((in_data.values()[0]), layer - 1)
+        return result
 
     def update(self, request, **kwargs):
         """
         __URL__: $LINK:composerpmmapping-detail:compose_id:package$
+
+        __Data__:
+
+            {
+                Variants:{
+                    archs:{
+                        rpm_names:[
+                            rpm_arch,
+                        ]
+                    }
+                }
+            }
 
         Allows updating the RPM mapping by using a `PUT` request with data
         containing new mapping. PDC will compute changes between current
         mapping and the requested one. The response contains a list of changes
         suitable for partial update via `PATCH` method.
 
+        __Response__:
+
+            [
+                {
+                    'release_id':       <str>,
+                    'srpm_name':        <str>,
+                    'action':           <str>,
+                    'variant':          <str>,
+                    'arch':             <str>,
+                    'rpm_name':         <str>,
+                    'rpm_arch':         <str>,
+                    'include':          <bool>,
+                }
+            ]
+
         By default, no changes are performed on the server. If you add
         `?perform=1` query string parameter, the changes will actually be saved
         in database as well as returned.
         """
         compose = get_object_or_404(Compose, compose_id=kwargs['compose_id'])
+        if not self._update_parameters_acceptable(request.data, 4):
+            return Response(
+                data={"detail": "The parameters' format for updating is wrong. Please read API documentation"},
+                status=status.HTTP_400_BAD_REQUEST)
         mapping, _ = compose.get_rpm_mapping(kwargs['package'])
         new_mapping = ComposeRPMMapping(data=request.data)
         changes = mapping.compute_changes(new_mapping)
@@ -763,9 +1064,18 @@ class ComposeRPMMappingView(StrictQueryParamMixin,
             _apply_changes(request, compose.release, changes)
         return Response(changes)
 
+    def bulk_update(self, *args, **kwargs):
+        """
+        It is possible to perform bulk update on compose rpm mapping with `PUT` or `PATCH`
+        method. The input must be a JSON object with `package`as
+        keys. Values for these keys should be in the same format as `update`.
+        """
+        return bulk_operations.bulk_update_impl(self, *args, **kwargs)
 
-class ComposeImageView(StrictQueryParamMixin,
+
+class ComposeImageView(StrictQueryParamMixin, CheckParametersMixin,
                        viewsets.GenericViewSet):
+    permission_classes = (APIPermission,)
     queryset = ComposeImage.objects.none()  # Required for permissions
     lookup_field = 'compose_id'
     lookup_value_regex = '[^/]+'
@@ -786,9 +1096,18 @@ class ComposeImageView(StrictQueryParamMixin,
                 "image_manifest": image_manifest
             }
 
+        __Response__:
+            {
+                "compose_id": string,
+                "imported images": int
+            }
+
         The `composeinfo` and `image_manifest` values should be actual JSON
         representation of composeinfo and image manifest, as stored in
         `composeinfo.json` and `image-manifest.json` files.
+
+        You can use <a href="https://pagure.io/pungi">Pungi</a> to produce
+        `composeinfo.json` and `image-manifest.json`.
 
         __Example__:
 
@@ -800,13 +1119,12 @@ class ComposeImageView(StrictQueryParamMixin,
         """
         data = request.data
         errors = {}
-        for key in ('release_id', 'composeinfo', 'image_manifest'):
-            if key not in data:
-                errors[key] = ["This field is required"]
+        fields = ['release_id', 'composeinfo', 'image_manifest']
+        self._check_parameters(fields, data.keys(), errors)
         if errors:
             return Response(status=400, data=errors)
-        lib.compose__import_images(request, data['release_id'], data['composeinfo'], data['image_manifest'])
-        return Response(status=201)
+        compose_id, imported_images = lib.compose__import_images(request, data['release_id'], data['composeinfo'], data['image_manifest'])
+        return Response(data={'compose': compose_id, 'imported images': imported_images}, status=status.HTTP_201_CREATED)
 
     def retrieve(self, request, **kwargs):
         """
@@ -840,6 +1158,7 @@ class ComposeImageView(StrictQueryParamMixin,
             im.disc_number = cimage.image.disc_number
             im.disc_count = cimage.image.disc_count
             im.checksums = {'sha256': cimage.image.sha256}
+            im.subvariant = cimage.image.subvariant
             if cimage.image.md5:
                 im.checksums['md5'] = cimage.image.md5
             if cimage.image.sha1:
@@ -848,25 +1167,6 @@ class ComposeImageView(StrictQueryParamMixin,
             manifest.add(cimage.variant_arch.variant.variant_uid, cimage.variant_arch.arch.name, im)
 
         return Response(manifest.serialize({}))
-
-
-class ComposeImportImagesView(StrictQueryParamMixin, viewsets.GenericViewSet):
-    # TODO: remove this class after next release
-    queryset = ComposeImage.objects.none()  # Required for permissions
-
-    def create(self, request):
-        """
-        This end-point is deprecated. Use $LINK:composeimage-list$ instead.
-        """
-        data = request.data
-        errors = {}
-        for key in ('release_id', 'composeinfo', 'image_manifest'):
-            if key not in data:
-                errors[key] = ["This field is required"]
-        if errors:
-            return Response(status=400, data=errors)
-        lib.compose__import_images(request, data['release_id'], data['composeinfo'], data['image_manifest'])
-        return Response(status=201)
 
 
 class ReleaseOverridesRPMViewSet(StrictQueryParamMixin,
@@ -882,6 +1182,7 @@ class ReleaseOverridesRPMViewSet(StrictQueryParamMixin,
     serializer_class = OverrideRPMSerializer
     queryset = OverrideRPM.objects.all().order_by('id')
     filter_class = OverrideRPMFilter
+    permission_classes = (APIPermission,)
 
     def create(self, *args, **kwargs):
         """
@@ -1052,6 +1353,101 @@ class ReleaseOverridesRPMViewSet(StrictQueryParamMixin,
         return result
 
 
+class OverridesRPMCloneViewSet(StrictQueryParamMixin, viewsets.GenericViewSet):
+    permission_classes = (APIPermission,)
+    queryset = OverrideRPM.objects.none()
+
+    def create(self, request):
+        """
+        Clone overrides-rpm from source-release to target-release, both them have to be existed.
+
+        With optional arguments, each optional argument specifies which type of overrides get copied.
+
+        And if overrides-rpm have exited in target-release, they don't get copied.
+
+        __Method__: POST
+
+        __URL__: $LINK:overridesrpmclone-list$
+
+        __DATA__:
+
+            {
+                "source_release_id":        string
+                "target_release_id":        string
+                "rpm_name":                 string      #optional
+                "srpm_name":                string      #optional
+                "variant":                  string      #optional
+                "arch":                     string      #optional
+            }
+
+        __Response__:
+
+            [
+                {
+                    "arch":                                     "string",
+                    "comment (optional, default=\"\")":         "string",
+                    "do_not_delete (optional, default=false)":  "boolean",
+                    "id (read-only)":                           "int",
+                    "include":                                  "boolean",
+                    "release":                                  "Release.release_id",
+                    "rpm_arch":                                 "string",
+                    "rpm_name":                                 "string",
+                    "srpm_name":                                "string",
+                    "variant":                                  "string"
+                }
+            ]
+        """
+        data = request.data
+        keys = set(['source_release_id', 'target_release_id'])
+        arg_filter_map = ['variant', 'arch', 'srpm_name', 'rpm_name', 'rpm_arch']
+        allowed_keys = list(keys) + arg_filter_map
+        extra_keys = set(data.keys()) - set(allowed_keys)
+        if extra_keys:
+            return Response({'detail': '%s keys are not allowed' % list(extra_keys)},
+                            status=status.HTTP_400_BAD_REQUEST)
+        for key in keys:
+            if key not in data:
+                return Response({'detail': 'Missing %s' % key},
+                                status=status.HTTP_400_BAD_REQUEST)
+        tmp_release = {}
+        for key in keys:
+            try:
+                tmp_release[key] = Release.objects.get(release_id=data.pop(key))
+            except Release.DoesNotExist:
+                return Response({'detail': '%s does not exist' % key},
+                                status=status.HTTP_404_NOT_FOUND)
+
+        kwargs = {'release__release_id': tmp_release['source_release_id'].release_id}
+        for arg in arg_filter_map:
+            arg_data = request.data.get(arg)
+            if arg_data:
+                kwargs[arg] = arg_data
+
+        overrides_rpm = OverrideRPM.objects.filter(**kwargs)
+        if not overrides_rpm:
+            return Response({'detail': 'there is no overrides-rpm in source release'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        results = []
+        for rpm in overrides_rpm:
+            orpm, created = OverrideRPM.objects.get_or_create(release=tmp_release['target_release_id'],
+                                                              rpm_name=rpm.rpm_name,
+                                                              rpm_arch=rpm.rpm_arch,
+                                                              variant=rpm.variant,
+                                                              arch=rpm.arch,
+                                                              srpm_name=rpm.srpm_name,
+                                                              comment=rpm.comment
+                                                              )
+            if created:
+                results.append(orpm.export())
+                request.changeset.add('OverridesRPM', orpm.pk,
+                                      'null', json.dumps(orpm.export()))
+        if results:
+            return Response(status=status.HTTP_201_CREATED, data=results)
+        else:
+            return Response({'detail': 'overridesRPMs have existed in target release'},
+                            status=status.HTTP_200_OK)
+
+
 class FilterBugzillaProductsAndComponents(StrictQueryParamMixin,
                                           viewsets.ReadOnlyModelViewSet):
     """
@@ -1059,6 +1455,7 @@ class FilterBugzillaProductsAndComponents(StrictQueryParamMixin,
     """
     queryset = ComposeRPM.objects.none()    # Required for permissions
     extra_query_params = ('nvr', )
+    permission_classes = (APIPermission,)
 
     def list(self, request):
         """
@@ -1209,6 +1606,7 @@ class FindComposeByReleaseRPMViewSet(StrictQueryParamMixin, FindComposeMixin, vi
     """
     queryset = ComposeRPM.objects.none()    # Required for permissions
     extra_query_params = ('included_compose_type', 'excluded_compose_type', 'latest', 'to_dict')
+    permission_classes = (APIPermission,)
 
     def list(self, request, **kwargs):
         """
@@ -1264,6 +1662,7 @@ class FindOlderComposeByComposeRPMViewSet(StrictQueryParamMixin, FindComposeMixi
     """
     queryset = ComposeRPM.objects.none()    # Required for permissions
     extra_query_params = ('included_compose_type', 'excluded_compose_type', 'to_dict')
+    permission_classes = (APIPermission,)
 
     def list(self, request, **kwargs):
         """
@@ -1316,6 +1715,7 @@ class FindComposeByProductVersionRPMViewSet(StrictQueryParamMixin, FindComposeMi
     """
     queryset = ComposeRPM.objects.none()    # Required for permissions
     extra_query_params = ('included_compose_type', 'excluded_compose_type', 'latest', 'to_dict')
+    permission_classes = (APIPermission,)
 
     def list(self, request, **kwargs):
         """
@@ -1364,6 +1764,108 @@ class FindComposeByProductVersionRPMViewSet(StrictQueryParamMixin, FindComposeMi
         return Response(self._get_composes_for_product_version())
 
 
+class ComposeImageRTTTestViewSet(ChangeSetUpdateModelMixin,
+                                 mixins.ListModelMixin,
+                                 mixins.RetrieveModelMixin,
+                                 StrictQueryParamMixin,
+                                 MultiLookupFieldMixin,
+                                 viewsets.GenericViewSet):
+    """
+    API endpoint that allows querying compose-image RTT Test results.
+
+    ##Test tools##
+
+    You can use ``curl`` in terminal, with -X _method_ (GET|POST|PATCH),
+    -d _data_ (a json string). or GUI plugins for
+    browsers, such as ``RESTClient``, ``RESTConsole``.
+    """
+    queryset = ComposeImage.objects.select_related('variant_arch', 'image').all()
+    serializer_class = ComposeImageRTTTestSerializer
+    filter_class = ComposeImageRTTTestFilter
+    permission_classes = (APIPermission,)
+
+    lookup_fields = (
+        ('variant_arch__variant__compose__compose_id', r'[^/]+'),
+        ('variant_arch__variant__variant_uid', r'[^/]+'),
+        ('variant_arch__arch__name', r'[^/]+'),
+        ('image__file_name', r'[^/]+'),
+    )
+
+    def list(self, *args, **kwargs):
+        """
+        __Method__: GET
+
+        __URL__: $LINK:composeimagertttests-list$
+
+        __Query params__:
+
+        %(FILTERS)s
+
+        __Response__: a paged list of following objects
+
+        %(SERIALIZER)s
+        """
+        return super(ComposeImageRTTTestViewSet, self).list(*args, **kwargs)
+
+    def retrieve(self, *args, **kwargs):
+        """
+        __Method__: GET
+
+        __URL__: $LINK:composeimagertttests-detail:compose_id}/{variant_uid}/{arch}/{file_name$
+
+        __Response__:
+
+        %(SERIALIZER)s
+        """
+        return super(ComposeImageRTTTestViewSet, self).retrieve(*args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        # This method is used by bulk update and partial update, but should not
+        # be called directly.
+        if not kwargs.get('partial', False):
+            return self.http_method_not_allowed(request, *args, **kwargs)
+
+        if not request.data:
+            return NoEmptyPatchMixin.make_response()
+
+        updatable_keys = set(['test_result'])
+        if set(request.data.keys()) - updatable_keys:
+            return Response(status=status.HTTP_400_BAD_REQUEST,
+                            data={'detail': 'Only these properties can be updated: %s'
+                                  % ', '.join(updatable_keys)})
+        return super(ComposeImageRTTTestViewSet, self).update(request, *args, **kwargs)
+
+    def bulk_update(self, *args, **kwargs):
+        """
+        It is possible to perform bulk partial update on composeimagertttest with `PATCH`
+        method. The input must be a JSON object with composeimagertttest identifiers as
+        keys. Values for these keys should be in the same format as when
+        updating a single composeimagertttest.
+        """
+        return bulk_operations.bulk_update_impl(self, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        """
+        Only `test_result` fields can be modified by this call.
+        Trying to change anything else will result in 400 BAD REQUEST response.
+
+        __Method__: PATCH
+
+        __URL__: $LINK:composeimagertttests-detail:compose_id}/{variant_uid}/{arch}/{file_name$
+
+        __Data__:
+
+            {
+                "test_result": string
+            }
+
+        __Response__:
+        same as for retrieve
+        """
+        kwargs['partial'] = True
+        return self.update(request, *args, **kwargs)
+
+
 class ComposeTreeViewSet(ChangeSetModelMixin,
                          StrictQueryParamMixin,
                          MultiLookupFieldMixin,
@@ -1380,11 +1882,13 @@ class ComposeTreeViewSet(ChangeSetModelMixin,
     queryset = ComposeTree.objects.select_related('compose', 'variant', 'arch').all()
     serializer_class = ComposeTreeSerializer
     filter_class = ComposeTreeFilter
+    permission_classes = (APIPermission,)
     lookup_fields = (
         ('compose__compose_id', r'[^/]+'),
         ('variant__variant_uid', r'[^/]+'),
         ('arch__name', r'[^/]+'),
         ('location__short', r'[^/]+'),
+        ('scheme__name', r'[^/]+'),
     )
 
     def list(self, *args, **kwargs):
@@ -1415,11 +1919,26 @@ class ComposeTreeViewSet(ChangeSetModelMixin,
 
          * *synced_content*: $LINK:contentdeliverycontentcategory-list$
 
+        All fields are required. The required architectures must already be
+        present in PDC. compose/variant/arch combo must exist already for CREATE.
+
         __Response__: Same as input data.
 
         __NOTE__:
         If synced_content is omitted, all content types are filled in.
         """
+        data = request.data
+        if 'compose' not in data:
+            return Response({'detail': 'Missing compose'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        try:
+            get_object_or_404(Compose, compose_id=data['compose'])
+        except Http404:
+            return Response({'detail': 'Compose %s does not existed' % data['compose']},
+                            status=status.HTTP_404_NOT_FOUND)
+        if 'variant' not in data:
+            return Response({'detail': 'Missing variant'},
+                            status=status.HTTP_400_BAD_REQUEST)
         if not request.data.get("synced_content"):
             request.data["synced_content"] = ['binary', 'debug', 'source']
         return super(ComposeTreeViewSet, self).create(request, *args, **kwargs)
@@ -1428,7 +1947,7 @@ class ComposeTreeViewSet(ChangeSetModelMixin,
         """
         __Method__: GET
 
-        __URL__: $LINK:composetreelocations-detail:compose_id}/{variant_uid}/{arch}/{location$
+        __URL__: $LINK:composetreelocations-detail:compose_id}/{variant_uid}/{arch}/{location}/{scheme$
 
         __Response__:
 
@@ -1470,7 +1989,7 @@ class ComposeTreeViewSet(ChangeSetModelMixin,
 
         __Method__: PATCH
 
-        __URL__: $LINK:composetreelocations-detail:compose_id}/{variant_uid}/{arch}/{location$
+        __URL__: $LINK:composetreelocations-detail:compose_id}/{variant_uid}/{arch}/{location}/{scheme$
 
         __Data__:
 
@@ -1494,10 +2013,76 @@ class ComposeTreeViewSet(ChangeSetModelMixin,
         __Method__:
         DELETE
 
-        __URL__: $LINK:composetreelocations-detail:compose_id}/{variant_uid}/{arch}/{location$
+        __URL__: $LINK:composetreelocations-detail:compose_id}/{variant_uid}/{arch}/{location}/{scheme$
 
         __Response__:
 
             STATUS: 204 NO CONTENT
         """
         return super(ComposeTreeViewSet, self).destroy(request, *args, **kwargs)
+
+
+class ComposeTreeRTTTestViewSet(ChangeSetUpdateModelMixin,
+                                mixins.ListModelMixin,
+                                mixins.RetrieveModelMixin,
+                                StrictQueryParamMixin,
+                                MultiLookupFieldMixin,
+                                viewsets.GenericViewSet):
+    """
+    This API is prepared for updating the `rtt_tested_architectures` key
+    in $LINK:compose-list$ API.
+    """
+    queryset = VariantArch.objects.all()
+    serializer_class = ComposeTreeRTTTestSerializer
+    filter_class = ComposeTreeRTTTestFilter
+    permission_classes = (APIPermission,)
+
+    lookup_fields = (
+        ('variant__compose__compose_id', r'[^/]+'),
+        ('variant__variant_uid', r'[^/]+'),
+        ('arch__name', r'[^/]+'),
+    )
+
+    def list(self, *args, **kwargs):
+        """
+        __Method__: GET
+
+        __URL__: $LINK:composetreertttests-list$
+
+        __Query params__:
+
+        %(FILTERS)s
+
+        __Response__: a paged list of following objects
+
+        %(SERIALIZER)s
+        """
+        return super(ComposeTreeRTTTestViewSet, self).list(*args, **kwargs)
+
+    def retrieve(self, *args, **kwargs):
+        """
+        __Method__: GET
+
+        __URL__: $LINK:composetreertttests-detail:compose_id}/{variant_uid}/{arch$
+
+        __Response__:
+
+        %(SERIALIZER)s
+        """
+        return super(ComposeTreeRTTTestViewSet, self).retrieve(*args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        """
+        __Method__: PUT, PATCH
+
+        __URL__: $LINK:composetreertttests-detail:compose_id}/{variant_uid}/{arch$
+
+        __Data__:
+
+        %(WRITABLE_SERIALIZER)s
+
+        __Response__:
+
+        %(SERIALIZER)s
+        """
+        return super(ComposeTreeRTTTestViewSet, self).update(request, *args, **kwargs)

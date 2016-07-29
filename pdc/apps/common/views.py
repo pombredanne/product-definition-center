@@ -9,6 +9,9 @@ from django.shortcuts import render
 from django.views import defaults
 from django.http import HttpResponse
 
+from pdc.apps.auth.permissions import APIPermission
+from pdc.apps.common.constants import PUT_OPTIONAL_PARAM_WARNING
+
 from rest_framework import viewsets, mixins, status
 
 from .models import Arch, SigKey, Label
@@ -191,6 +194,7 @@ class LabelViewSet(pdc_viewsets.PDCModelViewSet):
 
 
 class ArchViewSet(pdc_viewsets.ChangeSetCreateModelMixin,
+                  pdc_viewsets.ConditionalProcessingMixin,
                   pdc_viewsets.StrictQueryParamMixin,
                   mixins.ListModelMixin,
                   viewsets.GenericViewSet):
@@ -209,6 +213,7 @@ class ArchViewSet(pdc_viewsets.ChangeSetCreateModelMixin,
     serializer_class = ArchSerializer
     queryset = Arch.objects.all().order_by('id')
     lookup_field = 'name'
+    permission_classes = (APIPermission,)
 
     def list(self, request, *args, **kwargs):
         """
@@ -292,6 +297,8 @@ class SigKeyViewSet(pdc_viewsets.StrictQueryParamMixin,
     queryset = SigKey.objects.all().order_by('id')
     filter_class = SigKeyFilter
     lookup_field = 'key_id'
+    docstring_macros = PUT_OPTIONAL_PARAM_WARNING
+    permission_classes = (APIPermission,)
 
     def list(self, request, *args, **kwargs):
         """
@@ -330,6 +337,7 @@ class SigKeyViewSet(pdc_viewsets.StrictQueryParamMixin,
     def update(self, request, *args, **kwargs):
         """
         ### UPDATE
+        %(PUT_OPTIONAL_PARAM_WARNING)s
 
         __Method__: `PUT`, `PATCH`
 

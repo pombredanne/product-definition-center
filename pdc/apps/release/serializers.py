@@ -5,12 +5,13 @@
 #
 from rest_framework import serializers
 from django.core.exceptions import FieldError
-from django.core.validators import RegexValidator
 
 from pdc.apps.common.fields import ChoiceSlugField
 from pdc.apps.common import models as common_models
 from pdc.apps.common.serializers import StrictSerializerMixin
-from .models import Product, ProductVersion, Release, BaseProduct, ReleaseType, Variant, VariantArch, VariantType
+from .models import (Product, ProductVersion, Release,
+                     BaseProduct, ReleaseType, Variant,
+                     VariantArch, VariantType, ReleaseGroup, ReleaseGroupType)
 from . import signals
 
 
@@ -34,8 +35,6 @@ class ProductVersionSerializer(StrictSerializerMixin, serializers.ModelSerialize
     releases = serializers.SerializerMethodField()
     product = serializers.SlugRelatedField(slug_field='short',
                                            queryset=Product.objects.all())
-    short = serializers.CharField(required=False, validators=[
-        RegexValidator(regex=r"^[a-z\-]+$", message='Only accept lowercase letter or -')])
 
     class Meta:
         model = ProductVersion
@@ -64,11 +63,14 @@ class ReleaseSerializer(StrictSerializerMixin, serializers.ModelSerializer):
     product_version = serializers.SlugRelatedField(slug_field='product_version_id',
                                                    queryset=ProductVersion.objects.all(),
                                                    required=False,
-                                                   allow_null=True)
+                                                   allow_null=True,
+                                                   default=None)
     active = serializers.BooleanField(default=True)
     integrated_with = serializers.SlugRelatedField(slug_field='release_id',
                                                    queryset=Release.objects.all(),
-                                                   required=False)
+                                                   required=False,
+                                                   allow_null=True,
+                                                   default=None)
 
     class Meta:
         model = Release
@@ -110,10 +112,11 @@ class ReleaseSerializer(StrictSerializerMixin, serializers.ModelSerializer):
 
 class BaseProductSerializer(StrictSerializerMixin, serializers.ModelSerializer):
     base_product_id = serializers.CharField(read_only=True)
+    release_type = ChoiceSlugField(slug_field='short', queryset=ReleaseType.objects.all())
 
     class Meta:
         model = BaseProduct
-        fields = ('base_product_id', 'short', 'version', 'name')
+        fields = ('base_product_id', 'short', 'version', 'name', 'release_type')
 
 
 class ReleaseTypeSerializer(StrictSerializerMixin, serializers.ModelSerializer):
@@ -204,3 +207,27 @@ class VariantTypeSerializer(StrictSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = VariantType
         fields = ('name',)
+
+
+class ReleaseGroupSerializer(StrictSerializerMixin, serializers.ModelSerializer):
+    description         = serializers.CharField(required=True)
+    type                = ChoiceSlugField(slug_field='name',
+                                          queryset=ReleaseGroupType.objects.all())
+    releases            = ChoiceSlugField(slug_field='release_id',
+                                          many=True, queryset=Release.objects.all(),
+                                          allow_null=True, required=False, default=[])
+    active              = serializers.BooleanField(default=True)
+
+    class Meta:
+        model = ReleaseGroup
+        fields = ('name', 'description', 'type', 'releases', 'active')
+
+    def to_internal_value(self, data):
+        releases = data.get('releases', [])
+        for release in releases:
+            try:
+                Release.objects.get(release_id=release)
+            except Release.DoesNotExist:
+                raise serializers.ValidationError({'detail': 'release %s does not exist' % release})
+
+        return super(ReleaseGroupSerializer, self).to_internal_value(data)

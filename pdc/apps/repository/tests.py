@@ -53,13 +53,6 @@ class RepositorySerializerTestCase(APITestCase):
         obj = serializer.save()
         self.assertFalse(obj.shadow)
 
-    def test_deserialize_invalid_from_custom_validator(self):
-        self.data['content_category'] = 'debug'
-        serializer = serializers.RepoSerializer(data=self.data)
-        self.assertFalse(serializer.is_valid())
-        self.assertEqual(serializer.errors,
-                         {'detail': ["Missing 'debug' in repo name 'test_repo_2'"]})
-
     def test_deserialize_invalid_shadow(self):
         self.data['shadow'] = 'very shadow'
         serializer = serializers.RepoSerializer(data=self.data)
@@ -131,7 +124,7 @@ class RepositoryRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         }
 
     def test_retrieve(self):
-        response = self.client.get(reverse('repo-detail', args=[1]))
+        response = self.client.get(reverse('contentdeliveryrepos-detail', args=[1]))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertDictEqual(dict(response.data), self.existing)
 
@@ -150,25 +143,25 @@ class RepositoryRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
             'service': 'rhn', 'repo_family': 'dist', 'content_format': 'rpm',
             'content_category': 'debug', 'name': 'test_repo-debug', 'shadow': False, 'product_id': 33
         }
-        response = self.client.put(reverse('repo-detail', args=[1]),
+        response = self.client.put(reverse('contentdeliveryrepos-detail', args=[1]),
                                    data, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertNumChanges([1])
 
     def test_update_without_product_id(self):
         """The repo has product_id, update tries to change name with product_id unspecified in request."""
-        pid = self.existing.pop('product_id')
+        self.existing.pop('product_id')
         self.existing['name'] = 'new_name'
         id = self.existing.pop('id')
-        response = self.client.put(reverse('repo-detail', args=[1]), self.existing, format='json')
+        response = self.client.put(reverse('contentdeliveryrepos-detail', args=[1]), self.existing, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.existing['product_id'] = pid
+        self.existing['product_id'] = None
         self.existing['id'] = id
         self.assertDictEqual(dict(response.data), self.existing)
         self.assertNumChanges([1])
 
     def test_update_partial(self):
-        response = self.client.patch(reverse('repo-detail', args=[1]),
+        response = self.client.patch(reverse('contentdeliveryrepos-detail', args=[1]),
                                      {'shadow': True},
                                      format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -186,7 +179,7 @@ class RepositoryRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
             variant=variant,
             arch_id=47  # x86_64
         )
-        response = self.client.patch(reverse('repo-detail', args=[1]),
+        response = self.client.patch(reverse('contentdeliveryrepos-detail', args=[1]),
                                      {'variant_uid': 'Client'},
                                      format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -194,36 +187,62 @@ class RepositoryRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertDictEqual(dict(response.data), self.existing)
         self.assertNumChanges([1])
 
-    def test_update_partial_bad_name(self):
-        response = self.client.patch(reverse('repo-detail', args=[1]),
-                                     {'name': 'repo-debug-isos'},
-                                     format='json')
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertNumChanges([])
-
     def test_update_partial_bad_variant(self):
-        response = self.client.patch(reverse('repo-detail', args=[1]),
+        response = self.client.patch(reverse('contentdeliveryrepos-detail', args=[1]),
                                      {'variant_uid': 'foo', 'arch': 'bar'},
                                      format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertNumChanges([])
 
+    def test_update_missing_optional_fields_are_erased(self):
+        variant = release_models.Variant.objects.create(
+            release=release_models.Release.objects.get(release_id='release-1.0'),
+            variant_type=release_models.VariantType.objects.get(name='variant'),
+            variant_uid='Client', variant_name='Client', variant_id='Client'
+        )
+        release_models.VariantArch.objects.create(
+            variant=variant,
+            arch_id=47  # x86_64
+        )
+        data = {
+            'release_id': 'release-1.0', 'variant_uid': 'Client', 'arch': 'x86_64',
+            'service': 'rhn', 'repo_family': 'dist', 'content_format': 'rpm',
+            'content_category': 'debug', 'name': 'test_repo-debug', 'shadow': True
+        }
+        response = self.client.put(reverse('contentdeliveryrepos-detail', args=[1]),
+                                   data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['shadow'], True)
+        self.assertEqual(response.data['product_id'], None)
+
+        data = {
+            'release_id': 'release-1.0', 'variant_uid': 'Client', 'arch': 'x86_64',
+            'service': 'rhn', 'repo_family': 'dist', 'content_format': 'rpm',
+            'content_category': 'debug', 'name': 'test_repo-debug', 'product_id': 33
+        }
+        response = self.client.put(reverse('contentdeliveryrepos-detail', args=[1]),
+                                   data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['product_id'], 33)
+        self.assertEqual(response.data['shadow'], False)
+
     def test_create_duplicit(self):
-        response = self.client.post(reverse('repo-list'), self.existing)
+        response = self.client.post(reverse('contentdeliveryrepos-list'), self.existing)
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_create(self):
-        response = self.client.post(reverse('repo-list'), self.data)
+        response = self.client.post(reverse('contentdeliveryrepos-list'), self.data)
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.data.update({"name": "repo-x86_64-server-7-debug", "content_category": "debug"})
-        response = self.client.post(reverse('repo-list'), self.data)
+        response = self.client.post(reverse('contentdeliveryrepos-list'), self.data)
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(3, models.Repo.objects.count())
         self.assertNumChanges([1, 1])
 
     def test_create_extra_fields(self):
         self.data['foo'] = 'bar'
-        response = self.client.post(reverse('repo-list'), self.data)
+        response = self.client.post(reverse('contentdeliveryrepos-list'), self.data)
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data.get('detail'), 'Unknown fields: "foo".')
         self.assertNumChanges([])
@@ -235,7 +254,7 @@ class RepositoryRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         for key, value in self.existing.iteritems():
             if key == 'id':
                 continue
-            response = self.client.get(reverse('repo-list'), {key: value})
+            response = self.client.get(reverse('contentdeliveryrepos-list'), {key: value})
             self.assertEqual(response.status_code, status.HTTP_200_OK,
                              msg='Query on %s failed' % key)
             expected_results[key] = [self.existing]
@@ -244,22 +263,26 @@ class RepositoryRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertDictEqual(real_results, expected_results)
 
     def test_query_invalid_filter(self):
-        response = self.client.get(reverse('repo-list'), {'variant_arch': 'whatever'})
+        response = self.client.get(reverse('contentdeliveryrepos-list'), {'variant_arch': 'whatever'})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_query_shadow_invalid_filter(self):
+        response = self.client.get(reverse('contentdeliveryrepos-list'), {'shadow': 'abcde'})
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_query_non_existing(self):
-        response = self.client.get(reverse('repo-list'), {"release_id": "release-1.1"})
+        response = self.client.get(reverse('contentdeliveryrepos-list'), {"release_id": "release-1.1"})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['results'], [])
 
     def test_delete(self):
-        response = self.client.delete(reverse('repo-detail', args=[self.existing['id']]))
+        response = self.client.delete(reverse('contentdeliveryrepos-detail', args=[self.existing['id']]))
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertNumChanges([1])
         self.assertEqual(0, models.Repo.objects.count())
 
     def test_delete_no_match(self):
-        response = self.client.delete(reverse('repo-detail', args=[999]))
+        response = self.client.delete(reverse('contentdeliveryrepos-detail', args=[999]))
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertNumChanges([])
 
@@ -272,7 +295,7 @@ class RepositoryMultipleFilterTestCase(APITestCase):
     ]
 
     def setUp(self):
-        self.url = reverse('repo-list')
+        self.url = reverse('contentdeliveryrepos-list')
         services = ['pulp', 'ftp', 'rhn']
         families = ['beta', 'htb', 'dist']
         formats = ['rpm', 'iso', 'kickstart']
@@ -291,33 +314,55 @@ class RepositoryMultipleFilterTestCase(APITestCase):
                         self.client.post(self.url, data, format='json')
 
     def test_query_multiple_services(self):
-        response = self.client.get(reverse('repo-list') + '?service=pulp&service=ftp')
+        response = self.client.get(reverse('contentdeliveryrepos-list') + '?service=pulp&service=ftp')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 2 * 27)
 
     def test_multiple_families(self):
-        response = self.client.get(reverse('repo-list') + '?repo_family=beta&repo_family=htb')
+        response = self.client.get(reverse('contentdeliveryrepos-list') + '?repo_family=beta&repo_family=htb')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 2 * 27)
 
     def test_multiple_formats(self):
-        response = self.client.get(reverse('repo-list') + '?content_format=rpm&content_format=iso')
+        response = self.client.get(reverse('contentdeliveryrepos-list') + '?content_format=rpm&content_format=iso')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 2 * 27)
 
     def test_multiple_categories(self):
-        response = self.client.get(reverse('repo-list') + '?content_category=debug&content_category=binary')
+        response = self.client.get(reverse('contentdeliveryrepos-list') + '?content_category=debug&content_category=binary')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 2 * 27)
 
+    def test_multiple_names(self):
+        response = self.client.get(reverse('contentdeliveryrepos-list') + '?name=repo-pulp-beta-rpm-debug&name=repo-ftp-htb-iso-source')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+
     def test_multiple_combination(self):
-        query = ('?service=pulp&service=ftp'
-                 + '&repo_family=beta&repo_family=htb'
-                 + '&content_format=rpm&content_format=iso'
-                 + '&content_category=debug&content_category=binary')
-        response = self.client.get(reverse('repo-list') + query)
+        query = ('?service=pulp&service=ftp' +
+                 '&repo_family=beta&repo_family=htb' +
+                 '&content_format=rpm&content_format=iso' +
+                 '&content_category=debug&content_category=binary')
+        response = self.client.get(reverse('contentdeliveryrepos-list') + query)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 16)
+
+    def test_multiple_product_id(self):
+        response = self.client.patch(reverse('contentdeliveryrepos-detail', args=[1]),
+                                     {'product_id': 32},
+                                     format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['product_id'], 32)
+
+        response = self.client.patch(reverse('contentdeliveryrepos-detail', args=[2]),
+                                     {'product_id': 31},
+                                     format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['product_id'], 31)
+
+        response = self.client.get(reverse('contentdeliveryrepos-list') + '?product_id=32&product_id=31')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
 
 
 class RepositoryCloneTestCase(TestCaseWithChangeSetMixin, APITestCase):
@@ -388,7 +433,7 @@ class RepositoryCloneTestCase(TestCaseWithChangeSetMixin, APITestCase):
             del repo['id']
         self.assertItemsEqual(response.data, [self.repo1, self.repo2])
         repos = models.Repo.objects.filter(variant_arch__variant__release__release_id='release-1.1')
-        self.assertEqual(len(repos), 2)
+        self.assertEqual(len(repos), 3)
         self.assertNumChanges([2])
 
     def test_clone_with_explicit_includes(self):
@@ -403,7 +448,7 @@ class RepositoryCloneTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertItemsEqual(response.data, [self.repo1, self.repo2])
         repos = models.Repo.objects.filter(variant_arch__variant__release__release_id='release-1.1')
-        self.assertEqual(len(repos), 2)
+        self.assertEqual(len(repos), 3)
         self.assertNumChanges([2])
 
     def test_skipping_non_existing_variants(self):
@@ -412,7 +457,7 @@ class RepositoryCloneTestCase(TestCaseWithChangeSetMixin, APITestCase):
         response = self.client.post(reverse('repoclone-list'), args, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         repos = models.Repo.objects.filter(variant_arch__variant__release__release_id='release-1.1')
-        self.assertEqual(len(repos), 1)
+        self.assertEqual(len(repos), 2)
         self.assertNumChanges([1])
 
     def test_skip_on_include_service(self):
@@ -475,6 +520,14 @@ class RepositoryCloneTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertItemsEqual(response.data, [self.repo2])
         self.assertNumChanges([1])
 
+    def test_with_product_id_value_null(self):
+        args = {'release_id_from': 'release-1.1', 'release_id_to': 'release-1.0',
+                'include_product_id': None}
+        response = self.client.post(reverse('repoclone-list'), args, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data[0]['product_id'], None)
+        self.assertNumChanges([1])
+
     def test_fail_on_bad_include_shadow(self):
         args = {'release_id_from': 'release-1.0', 'release_id_to': 'release-1.1',
                 'include_shadow': 'yes please'}
@@ -482,7 +535,7 @@ class RepositoryCloneTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_clone_should_not_create_duplicate(self):
-        self.client.post(reverse('repo-list'), self.repo1, format='json')
+        self.client.post(reverse('contentdeliveryrepos-list'), self.repo1, format='json')
         self.assertNumChanges([1])
         args = {'release_id_from': 'release-1.0', 'release_id_to': 'release-1.1'}
         response = self.client.post(reverse('repoclone-list'), args, format='json')
@@ -490,7 +543,7 @@ class RepositoryCloneTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertNumChanges([1])
         self.assertEqual(
             models.Repo.objects.filter(variant_arch__variant__release__release_id='release-1.1').count(),
-            1
+            2
         )
 
     def test_clone_bad_argument(self):
@@ -504,12 +557,12 @@ class RepositoryCloneTestCase(TestCaseWithChangeSetMixin, APITestCase):
 
 class RepoFamilyTestCase(TestCaseWithChangeSetMixin, APITestCase):
     def test_list_all(self):
-        response = self.client.get(reverse('repofamily-list'))
+        response = self.client.get(reverse('contentdeliveryrepofamily-list'))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 3)
 
     def test_filter(self):
-        response = self.client.get(reverse('repofamily-list'), data={"name": "di"})
+        response = self.client.get(reverse('contentdeliveryrepofamily-list'), data={"name": "di"})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 1)
         self.assertEqual(response.data['results'][0]['name'], 'dist')
@@ -541,7 +594,7 @@ class RepoBulkTestCase(TestCaseWithChangeSetMixin, APITestCase):
                  'content_category': 'binary',
                  'name': 'repo-1.0-beta-rpms',
                  'shadow': False}]
-        response = self.client.post(reverse('repo-list'), args, format='json')
+        response = self.client.post(reverse('contentdeliveryrepos-list'), args, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertNumChanges([2])
         self.assertEqual(models.Repo.objects.all().count(), 2)
@@ -565,7 +618,7 @@ class RepoBulkTestCase(TestCaseWithChangeSetMixin, APITestCase):
                  'content_category': 'binary',
                  'name': 'repo-1.0-beta-rpms',
                  'shadow': False}]
-        response = self.client.post(reverse('repo-list'), args, format='json')
+        response = self.client.post(reverse('contentdeliveryrepos-list'), args, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.maxDiff = None
         self.assertRegexpMatches(response.data.get('detail', {}).pop('content_format')[0],
@@ -594,7 +647,7 @@ class RepoBulkTestCase(TestCaseWithChangeSetMixin, APITestCase):
                  'content_format': 'rpm',
                  'content_category': 'binary',
                  'name': 'repo-1.0-htb-rpms',
-                 'product_id': None,
+                 'product_id': 0,
                  'shadow': False},
                 {'release_id': 'release-1.0',
                  'variant_uid': 'Server',
@@ -604,11 +657,11 @@ class RepoBulkTestCase(TestCaseWithChangeSetMixin, APITestCase):
                  'content_format': 'rpm',
                  'content_category': 'binary',
                  'name': 'repo-1.0-beta-rpms',
-                 'product_id': None,
+                 'product_id': 0,
                  'shadow': False}]
-        response = self.client.post(reverse('repo-list'), args, format='json')
+        response = self.client.post(reverse('contentdeliveryrepos-list'), args, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        response = self.client.delete(reverse('repo-list'),
+        response = self.client.delete(reverse('contentdeliveryrepos-list'),
                                       [r['id'] for r in response.data],
                                       format='json')
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
@@ -622,7 +675,7 @@ class VariantUpdateTestCase(APITestCase):
     ]
 
     def setUp(self):
-        self.client.post(reverse('repo-list'),
+        self.client.post(reverse('contentdeliveryrepos-list'),
                          {'release_id': 'release-1.0', 'name': 'test-repo',
                           'service': 'pulp', 'arch': 'x86_64', 'content_format': 'rpm',
                           'content_category': 'binary', 'variant_uid': 'Server-UID',

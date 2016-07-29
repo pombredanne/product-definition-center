@@ -11,7 +11,7 @@ from django.core.exceptions import FieldError
 
 import django_filters
 
-from pdc.apps.common.filters import (MultiValueFilter, MultiIntFilter,
+from pdc.apps.common.filters import (MultiValueFilter, MultiIntFilter, MultiValueRegexFilter,
                                      NullableCharFilter, CaseInsensitiveBooleanFilter)
 from . import models
 
@@ -57,7 +57,7 @@ def dependency_filter(type, queryset, value):
 
 
 class RPMFilter(django_filters.FilterSet):
-    name        = MultiValueFilter()
+    name        = MultiValueRegexFilter()
     version     = MultiValueFilter()
     epoch       = MultiIntFilter()
     release     = MultiValueFilter()
@@ -68,6 +68,7 @@ class RPMFilter(django_filters.FilterSet):
     compose     = MultiValueFilter(name='composerpm__variant_arch__variant__compose__compose_id',
                                    distinct=True)
     linked_release = MultiValueFilter(name='linked_releases__release_id', distinct=True)
+    built_for_release = MultiValueFilter(name='built_for_release__release_id', distinct=True)
     provides = django_filters.MethodFilter(action=partial(dependency_filter,
                                                           models.Dependency.PROVIDES))
     requires = django_filters.MethodFilter(action=partial(dependency_filter,
@@ -85,7 +86,7 @@ class RPMFilter(django_filters.FilterSet):
     class Meta:
         model = models.RPM
         fields = ('name', 'version', 'epoch', 'release', 'arch', 'srpm_name',
-                  'srpm_nevra', 'compose', 'filename', 'linked_release',
+                  'srpm_nevra', 'compose', 'filename', 'linked_release', 'built_for_release',
                   'provides', 'requires', 'obsoletes', 'conflicts', 'recommends', 'suggests',
                   'has_no_deps')
 
@@ -104,6 +105,7 @@ class ImageFilter(django_filters.FilterSet):
     md5                 = MultiValueFilter()
     sha1                = MultiValueFilter()
     sha256              = MultiValueFilter()
+    subvariant          = MultiValueFilter()
     compose             = MultiValueFilter(name='composeimage__variant_arch__variant__compose__compose_id',
                                            distinct=True)
     bootable            = CaseInsensitiveBooleanFilter()
@@ -112,7 +114,7 @@ class ImageFilter(django_filters.FilterSet):
         model = models.Image
         fields = ('file_name', 'image_format', 'image_type', 'disc_number',
                   'disc_count', 'arch', 'mtime', 'size', 'bootable',
-                  'implant_md5', 'volume_id', 'md5', 'sha1', 'sha256')
+                  'implant_md5', 'volume_id', 'md5', 'sha1', 'sha256', 'subvariant')
 
 
 class BuildImageFilter(django_filters.FilterSet):
@@ -150,3 +152,13 @@ class BuildImageFilter(django_filters.FilterSet):
         model = models.BuildImage
         fields = ('component_name', 'rpm_version', 'rpm_release', 'image_id', 'image_format', 'md5',
                   'archive_build_nvr', 'archive_name', 'archive_size', 'archive_md5', 'release_id')
+
+
+class BuildImageRTTTestsFilter(django_filters.FilterSet):
+    build_nvr = MultiValueFilter(name='image_id')
+    test_result = MultiValueFilter(name='test_result__name')
+    image_format = MultiValueFilter(name='image_format__name')
+
+    class Meta:
+        model = models.BuildImage
+        fields = ('build_nvr', 'test_result', 'image_format')

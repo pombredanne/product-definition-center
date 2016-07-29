@@ -5,7 +5,9 @@
 #
 from datetime import datetime
 import random
+import time
 
+from django.conf import settings
 from django.core.urlresolvers import reverse
 from django.test import TestCase
 from rest_framework.test import APITestCase
@@ -19,7 +21,9 @@ class EpochFormatTest(TestCase):
     def test_for_selected_values(self):
         data = [
             (1412695330, "2014-10-07 15:22:10"),
+            (datetime(2014, 10, 7, 15, 22, 10), "2014-10-07 15:22:10"),
             (1388534400, "2014-01-01 00:00:00"),
+            (datetime(2014, 1, 1), "2014-01-01 00:00:00"),
         ]
         for ts, expected in data:
             self.assertEqual(expected, epochformat(ts))
@@ -42,7 +46,7 @@ class APIRootTestCase(APITestCase):
 
     def test_root_includes_release_component_contacts(self):
         response = self.client.get(reverse('api-root'))
-        self.assertIn('release-components/{instance_pk}/contacts', response.data)
+        self.assertIn('release-component-contacts', response.data)
 
     def test_root_includes_release_rpm_mapping(self):
         response = self.client.get(reverse('api-root'))
@@ -50,3 +54,31 @@ class APIRootTestCase(APITestCase):
         self.assertIn(key, response.data)
         self.assertEqual(response.data[key],
                          'http://testserver/rest_api/v1/releases/{release_id}/rpm-mapping/{package}/')
+
+
+class TestCacheRESTTestCase(APITestCase):
+    fixtures = [
+        "pdc/apps/release/fixtures/tests/release.json",
+    ]
+
+    def test_cache(self):
+        tmp = settings.CACHE_MIDDLEWARE_SECONDS
+        settings.CACHE_MIDDLEWARE_SECONDS = 10
+
+        response = self.client.get(reverse('baseproduct-list'))
+        self.assertEqual(response.data['count'], 0)
+
+        args = {"name": "Our Awesome Product", "short": "product", "version": "1", "release_type": "ga"}
+        response = self.client.post(reverse('baseproduct-list'), args)
+        self.assertEqual(status.HTTP_201_CREATED, response.status_code)
+
+        response = self.client.get(reverse('baseproduct-list'))
+        self.assertEqual(response.data['count'], 0)
+        self.assertTrue(response.has_header('Cache-Control'))
+        self.assertTrue(response.has_header('Last-Modified'))
+
+        time.sleep(11)
+        response = self.client.get(reverse('baseproduct-list'))
+        self.assertEqual(response.data['count'], 1)
+
+        settings.CACHE_MIDDLEWARE_SECONDS = tmp

@@ -41,10 +41,13 @@ def exception_handler(exc, context):
             return Response({'detail': msg},
                             status=status.HTTP_400_BAD_REQUEST)
         elif isinstance(exc, exceptions.ObjectDoesNotExist):
-            return Response(NOT_FOUND_JSON_RESPONSE,
+            return Response({'detail': 'Not found:  %s' % str(exc)},
                             status=status.HTTP_404_NOT_FOUND)
         elif isinstance(exc, ProtectedError):
             return Response({"detail": "%s %s" % exc.args},
+                            status=status.HTTP_400_BAD_REQUEST)
+        elif isinstance(exc, ValueError):
+            return Response({'detail': str(exc)},
                             status=status.HTTP_400_BAD_REQUEST)
         elif isinstance(exc, db.IntegrityError):
             # Refs PEP249

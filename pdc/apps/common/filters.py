@@ -7,7 +7,9 @@
 import functools
 
 from django import forms
+from django.core.exceptions import ValidationError
 from django.core.validators import EMPTY_VALUES
+from django.db.models import Q
 from django.utils import six
 from django_filters.filterset import (BaseFilterSet,
                                       FilterSet,
@@ -15,8 +17,10 @@ from django_filters.filterset import (BaseFilterSet,
                                       FilterSetOptions)
 import django_filters
 import django.forms.widgets as widgets
+import operator
 from .models import Label, SigKey
 from .hacks import convert_str_to_int
+from pdc.apps.utils.utils import is_valid_regexp
 
 SelectMultiple = widgets.SelectMultiple
 
@@ -47,6 +51,48 @@ class MultiValueFilter(django_filters.MethodFilter):
         qs = qs.filter(**{self.name + '__in': value})
         if self.distinct:
             qs = qs.distinct()
+        return qs
+
+
+class MultiValueCaseInsensitiveFilter(MultiValueFilter):
+    """
+    Filter that allows multiple case insensitive terms to be present and treats them as
+    alternatives, i.e. it performs OR search.
+    """
+    @value_is_not_empty
+    def filter(self, qs, value):
+        if value:
+            condition_list = []
+            for val in value:
+                condition_list.append(Q(**{self.name + '__iexact': val}))
+            qs = qs.filter(reduce(operator.or_, condition_list))
+            if self.distinct:
+                qs = qs.distinct()
+        else:
+            qs = qs.model.objects.none()
+        return qs
+
+
+class MultiValueRegexFilter(MultiValueFilter):
+    """
+    Filter that allows multiple terms to be present and treats them as
+    alternatives with  regular expression match,
+    i.e. it performs OR search.
+    """
+    @value_is_not_empty
+    def filter(self, qs, value):
+        if value:
+            for i in value:
+                if not is_valid_regexp(i):
+                    raise ValidationError('At least one parameter is invalid regular expression: %s' % str(i))
+            condition_list = []
+            for i in value:
+                condition_list.append(Q(**{self.name + '__regex': i}))
+            qs = qs.filter(reduce(operator.or_, condition_list))
+            if self.distinct:
+                qs = qs.distinct()
+        else:
+            qs = qs.model.objects.none()
         return qs
 
 
@@ -203,8 +249,8 @@ class LabelFilter(FilterSet):
 
 
 class SigKeyFilter(FilterSet):
-    name = django_filters.CharFilter()
-    key_id = django_filters.CharFilter()
+    name = MultiValueFilter()
+    key_id = MultiValueFilter()
     description = django_filters.CharFilter(lookup_type="icontains")
 
     class Meta:
@@ -235,9 +281,14 @@ class CaseInsensitiveBooleanFilter(django_filters.CharFilter):
     TRUE_STRINGS = ('true', 't', '1')
     FALSE_STRINGS = ('false', 'f', '0')
 
+    def _validate_boolean(self, value):
+        if value.lower() not in self.TRUE_STRINGS + self.FALSE_STRINGS:
+            raise ValueError('%s is not a valid boolean value' % value)
+
     def filter(self, qs, value):
         if not value:
             return qs
+        self._validate_boolean(value)
         if value.lower() in self.TRUE_STRINGS:
             qs = qs.filter(**{self.name: True})
         elif value.lower() in self.FALSE_STRINGS:

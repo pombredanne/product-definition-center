@@ -16,6 +16,7 @@ from rest_framework import status
 
 from pdc.apps.bindings import models as binding_models
 from pdc.apps.common.test_utils import create_user, TestCaseWithChangeSetMixin
+from pdc.apps.common.constants import PDC_WARNING_HEADER_NAME
 from pdc.apps.release.models import Release, ProductVersion
 from pdc.apps.component.models import (ReleaseComponent,
                                        BugzillaComponent)
@@ -88,17 +89,17 @@ class FindComposeByReleaseRPMTestCase(APITestCase):
             {'compose': u'compose-1', 'packages': [
                 {'name': u'bash', 'version': u'1.2.3', 'epoch': 0, 'release': u'4.b1',
                  'arch': u'x86_64', 'srpm_name': u'bash', 'srpm_nevra': u'bash-0:1.2.3-4.b1.src',
-                 'filename': 'bash-1.2.3-4.b1.x86_64.rpm', 'id': 1,
+                 'filename': 'bash-1.2.3-4.b1.x86_64.rpm', 'id': 1, 'built_for_release': None,
                  'linked_composes': ['compose-1', 'compose-2'], 'linked_releases': []}]},
             {'compose': u'compose-2', 'packages': [
                 {'name': u'bash', 'version': u'1.2.3', 'epoch': 0, 'release': u'4.b1',
                  'arch': u'x86_64', 'srpm_name': u'bash', 'srpm_nevra': u'bash-0:1.2.3-4.b1.src',
-                 'filename': 'bash-1.2.3-4.b1.x86_64.rpm', 'id': 1,
+                 'filename': 'bash-1.2.3-4.b1.x86_64.rpm', 'id': 1, 'built_for_release': None,
                  'linked_composes': ['compose-1', 'compose-2'], 'linked_releases': []}]},
             {'compose': u'compose-3', 'packages': [
                 {'name': u'bash', 'version': u'5.6.7', 'epoch': 0, 'release': u'8',
                  'arch': u'x86_64', 'srpm_name': u'bash', 'srpm_nevra': None,
-                 'filename': 'bash-5.6.7-8.x86_64.rpm', 'id': 2,
+                 'filename': 'bash-5.6.7-8.x86_64.rpm', 'id': 2, 'built_for_release': None,
                  'linked_composes': ['compose-3'], 'linked_releases': []}]}
         ]
         self.assertEqual(response.data, expected)
@@ -162,7 +163,7 @@ class FindOlderComposeByComposeRPMTestCase(APITestCase):
         self.assertDictEqual(
             dict(packages[0]),
             {'name': 'bash', 'version': '1.2.3', 'epoch': 0, 'release': '4.b1',
-             'arch': 'x86_64', 'srpm_name': 'bash', 'srpm_nevra': 'bash-0:1.2.3-4.b1.src',
+             'arch': 'x86_64', 'srpm_name': 'bash', 'srpm_nevra': 'bash-0:1.2.3-4.b1.src', 'built_for_release': None,
              'filename': 'bash-1.2.3-4.b1.x86_64.rpm'})
 
     def test_same_version_different_arch(self):
@@ -345,10 +346,28 @@ class ComposeAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 0)
 
+    def test_query_compose_rpmnvras(self):
+        response = self.client.get(reverse('compose-list'), {"srpm_name": "bash", "rpm_arch": "x86_64",
+                                                             "rpm_release": "4.b1", "rpm_version": "1.2.3",
+                                                             "rpm_name": "bash"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+
+    def test_query_compose_rpmnvras_with_illegal_param(self):
+        response = self.client.get(reverse('compose-list'), {"srpm_name": "bash", "rpm_arch": "x86_64",
+                                                             "rpm_release": "4.b1", "rpm_version": "1.2.3",
+                                                             "rpm_name": "does-not-exist"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
     def test_query_compose_rpmnvr(self):
         response = self.client.get(reverse('compose-list'), {"rpm_nvr": "bash-1.2.3-4.b1"})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 1)
+
+    def test_query_compose_deleted_with_illegal_param(self):
+        response = self.client.get(reverse('compose-list'), {"deleted": "abcd"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_query_compose_rpmnvr_nonexisting(self):
         response = self.client.get(reverse('compose-list'), {"rpm_nvr": "does-not-exist"})
@@ -382,6 +401,94 @@ class ComposeAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
         response = self.client.get(reverse('compose-list'), {"acceptance_testing": "broken"})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 0)
+
+    def test_delete_compose(self):
+        response = self.client.get(reverse('compose-detail', args=["compose-1"]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['deleted'], False)
+
+        response = self.client.delete(reverse('compose-detail', args=["compose-1"]))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertNumChanges([1])
+
+        response = self.client.get(reverse('compose-detail', args=["compose-1"]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['deleted'], True)
+
+    def test_delete_deleted_compose(self):
+        self.client.delete(reverse('compose-detail', args=["compose-1"]))
+        response = self.client.delete(reverse('compose-detail', args=["compose-1"]))
+        self.assertEqual(response._headers[PDC_WARNING_HEADER_NAME.lower()],
+                         (PDC_WARNING_HEADER_NAME, 'No change. This compose was marked as deleted already.'))
+
+
+class ComposeMultipleFilterTestCase(APITestCase):
+    fixtures = [
+        "pdc/apps/common/fixtures/test/sigkey.json",
+        "pdc/apps/package/fixtures/test/rpm.json",
+        "pdc/apps/release/fixtures/tests/product.json",
+        "pdc/apps/release/fixtures/tests/product_version.json",
+        "pdc/apps/release/fixtures/tests/release.json",
+        "pdc/apps/compose/fixtures/tests/variant.json",
+        "pdc/apps/compose/fixtures/tests/variant_arch.json",
+        "pdc/apps/compose/fixtures/tests/compose_overriderpm.json",
+        "pdc/apps/compose/fixtures/tests/compose.json",
+        "pdc/apps/compose/fixtures/tests/compose_composerpm.json",
+        "pdc/apps/compose/fixtures/tests/more_composes.json",
+    ]
+
+    def test_query_multiple_acceptance_testing(self):
+        response = self.client.patch(reverse('compose-detail', args=['compose-2']),
+                                     {'acceptance_testing': 'passed'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('acceptance_testing'), 'passed')
+        response = self.client.get(reverse('compose-list') + '?acceptance_testing=untested&acceptance_testing=passed')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 3)
+
+    def test_query_multiple_compose_date(self):
+        response = self.client.get(reverse('compose-list') + '?compose_date=2014-09-03&compose_date=2014-09-08')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+
+    def test_query_multiple_compose_id(self):
+        response = self.client.get(reverse('compose-list') + '?compose_id=COMPose-1&compose_id=compose-2')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+
+    def test_query_multiple_compose_label(self):
+        response = self.client.get(reverse('compose-list') + '?compose_label=compose-2 label&compose_label=compose-3 label')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+
+    def test_query_multiple_compose_respin(self):
+        response = self.client.get(reverse('compose-list') + '?compose_respin=1&compose_respin=2')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 3)
+
+    def test_query_multiple_compose_type(self):
+        response = self.client.get(reverse('compose-list') + '?compose_type=production&compose_type=nightly')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 3)
+
+    def test_query_multiple_release(self):
+        response = self.client.get(reverse('compose-list') + '?release=Release-1.0&release=nonexist')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 3)
+
+    def test_query_multiple_rpm_name(self):
+        response = self.client.get(reverse('compose-list') + '?rpm_name=bash1&rpm_name=BaSH')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 3)
+
+    def test_query_multiple_rpm_values(self):
+        response = self.client.get(reverse('compose-list') + '?rpm_name=does-not-exist&rpm_name=bash&' +
+                                                             'srpm_name=does-not-exist&srpm_name=bash&' +
+                                                             'rpm_version=does-not-exist&rpm_version=1.2.3&' +
+                                                             'rpm_release=does-not-exist&rpm_release=4.b1&' +
+                                                             'rpm_arch=does-not-exist&rpm_arch=x86_64')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
 
 
 class ComposeApiOrderingTestCase(APITestCase):
@@ -439,6 +546,11 @@ class ComposeUpdateTestCase(TestCaseWithChangeSetMixin, APITestCase):
                                      {'compose_label': 'i am a label'})
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_can_not_update_compose_to_deleted(self):
+        response = self.client.patch(reverse('compose-detail', args=['compose-1']),
+                                     {'deleted': 'True'})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
     def test_update_linked_releases(self):
         response = self.client.patch(reverse('compose-detail', args=['compose-1']),
                                      {'linked_releases': ['release-1.0-updates']},
@@ -489,6 +601,9 @@ class ComposeUpdateTestCase(TestCaseWithChangeSetMixin, APITestCase):
         response = self.client.patch(reverse('compose-detail', args=['compose-1']),
                                      {}, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # check response header
+        self.assertEqual(response._headers[PDC_WARNING_HEADER_NAME.lower()],
+                         (PDC_WARNING_HEADER_NAME, 'Partial update with no changes does not make much sense.'))
 
     def test_patch_linked_releases_not_a_list(self):
         response = self.client.patch(reverse('compose-detail', args=['compose-1']),
@@ -585,10 +700,19 @@ class ComposeUpdateTestCase(TestCaseWithChangeSetMixin, APITestCase):
             self.assertEqual(response.data.get('detail', []), [err])
         self.assertNumChanges([])
 
+    def test_update_with_wrong_input(self):
+        response = self.client.patch(reverse('compose-detail', args=['compose-1']),
+                                     [{'rtt_tested_architectures': 'wronginput'}],
+                                     format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['detail'], 'The parameters\' format for updating is wrong. '
+                                                  'Please read API documentation')
+
 
 class OverridesRPMAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
     fixtures = [
         'pdc/apps/release/fixtures/tests/release.json',
+        'pdc/apps/release/fixtures/tests/new_release.json',
         'pdc/apps/compose/fixtures/tests/compose_overriderpm.json',
     ]
 
@@ -611,6 +735,20 @@ class OverridesRPMAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
         response = self.client.get(reverse('overridesrpm-list'), {'release': 'release-1.1'})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 0)
+
+    def test_query_multi_values_and_case_insensitive(self):
+        self.override_rpm["rpm_name"] = "bash-debuginfo"
+        self.override_rpm["release"] = "release-2.0"
+        del self.override_rpm["id"]
+        response = self.client.post(reverse('overridesrpm-list'), self.override_rpm)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(models.OverrideRPM.objects.count(), 2)
+        response = self.client.get(reverse('overridesrpm-list') + "?rpm_name=bash-doc&rpm_name=bash-debuginfo")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+        response = self.client.get(reverse('overridesrpm-list') + "?release=Release-1.0&release=rElease-2.0")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
 
     def test_delete_existing(self):
         response = self.client.delete(reverse('overridesrpm-detail', args=[1]))
@@ -702,16 +840,160 @@ class OverridesRPMAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertEqual(models.OverrideRPM.objects.count(), 0)
 
 
+class OverridesRPMCloneAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
+    fixtures = [
+        "pdc/apps/common/fixtures/test/sigkey.json",
+        "pdc/apps/package/fixtures/test/rpm.json",
+        "pdc/apps/release/fixtures/tests/release.json",
+        "pdc/apps/compose/fixtures/tests/variant.json",
+        "pdc/apps/compose/fixtures/tests/variant_arch.json",
+        "pdc/apps/release/fixtures/tests/variant.json",
+        "pdc/apps/release/fixtures/tests/variant_arch.json",
+        "pdc/apps/compose/fixtures/tests/compose_overriderpm.json",
+        "pdc/apps/compose/fixtures/tests/compose.json",
+        "pdc/apps/compose/fixtures/tests/more_release_mapping.json",
+        "pdc/apps/compose/fixtures/tests/compose_composerpm.json",
+    ]
+
+    def setUp(self):
+        self.release = release_models.Release.objects.get(release_id='release-1.0')
+        self.override_rpm = {'id': 1, 'release': 'release-1.0', 'variant': 'Server', 'arch': 'x86_64',
+                             'srpm_name': 'bash', 'rpm_name': 'bash-doc', 'rpm_arch': 'x86_64',
+                             'include': False, 'comment': '', 'do_not_delete': False}
+
+    def test_clone_overridesRPM(self):
+        args = {"name": "Supplementary", "short": "supp", "version": "1.1",
+                "release_type": "ga"}
+        target_response = self.client.post(reverse('release-list'), args)
+        self.assertEqual(target_response.status_code, status.HTTP_201_CREATED)
+        target_release_id = target_response.data['release_id']
+        response = self.client.post(reverse('overridesrpmclone-list'),
+                                    {'source_release_id': 'release-1.0',
+                                     'target_release_id': target_release_id},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertNumChanges([1, 1])
+
+    def test_clone_overridesRPM_with_orpm_existed_in_target_release(self):
+        args = {"name": "Supplementary", "short": "supp", "version": "1.1",
+                "release_type": "ga"}
+        target_response = self.client.post(reverse('release-list'), args)
+        self.assertEqual(target_response.status_code, status.HTTP_201_CREATED)
+        target_release_id = target_response.data['release_id']
+        response1 = self.client.post(reverse('overridesrpmclone-list'),
+                                     {'source_release_id': 'release-1.0',
+                                      'target_release_id': target_release_id},
+                                     format='json')
+        self.assertEqual(response1.status_code, status.HTTP_201_CREATED)
+        response = self.client.post(reverse('overridesrpmclone-list'),
+                                    {'source_release_id': 'release-1.0',
+                                     'target_release_id': target_release_id},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_clone__overridesRPM_with_filter_rpm_name(self):
+        args = {"name": "Supplementary", "short": "supp", "version": "1.1",
+                "release_type": "ga"}
+        target_response = self.client.post(reverse('release-list'), args)
+        target_release_id = target_response.data['release_id']
+        self.override_rpm["rpm_name"] = "bash-debuginfo"
+        del self.override_rpm["id"]
+        response1 = self.client.post(reverse('overridesrpm-list'), self.override_rpm)
+        self.assertEqual(response1.status_code, status.HTTP_201_CREATED)
+        response = self.client.post(reverse('overridesrpmclone-list'),
+                                    {'source_release_id': 'release-1.0',
+                                     'target_release_id': target_release_id,
+                                     'rpm_name': "bash-debuginfo"},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_clone_overridesRPM_with_error_target_release(self):
+        response = self.client.post(reverse('overridesrpmclone-list'),
+                                    {'source_release_id': 'release-1.0',
+                                     'target_release_id': 'release-2.0'},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_clone_overridesRPM_without_target_release(self):
+        response = self.client.post(reverse('overridesrpmclone-list'),
+                                    {'source_release_id': 'release-1.0'},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_clone_overridesRPM_with_error_source_release(self):
+        response = self.client.post(reverse('overridesrpmclone-list'),
+                                    {'source_release_id': 'release-2.0',
+                                     'target_release_id': 'release-1.0'},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_clone_overridesRPM_without_source_release(self):
+        response = self.client.post(reverse('overridesrpmclone-list'),
+                                    {'target_release_id': 'release-1.0'},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_clone_when_source_release_has_no_overridesrpm(self):
+        args = {"name": "Supplementary", "short": "supp", "version": "1.1",
+                "release_type": "ga"}
+        target_response = self.client.post(reverse('release-list'), args)
+        self.assertEqual(target_response.status_code, status.HTTP_201_CREATED)
+        target_release_id = target_response.data['release_id']
+        response = self.client.post(reverse('overridesrpmclone-list'),
+                                    {'source_release_id': target_release_id,
+                                     'target_release_id': 'release-1.0'},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_clone_overridesrpm_with_error_keys(self):
+        args = {"name": "Supplementary", "short": "supp", "version": "1.1",
+                "release_type": "ga"}
+        target_response = self.client.post(reverse('release-list'), args)
+        self.assertEqual(target_response.status_code, status.HTTP_201_CREATED)
+        target_release_id = target_response.data['release_id']
+        response = self.client.post(reverse('overridesrpmclone-list'),
+                                    {'source_release_id': 'release-1.0',
+                                     'target_release_id': target_release_id,
+                                     'error_key': 'error_info'},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_clone_and_verify_release_rpm_mapping(self):
+        # Source release can pass with release_mapping method work
+        response = self.client.get(reverse('releaserpmmapping-detail',
+                                           args=['release-1.0', 'bash']))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        # Before clone, target release can't work with release_mapping method
+        target_response = self.client.get(reverse('release-list'), release_id='release-3.0')
+        self.assertEqual(target_response.status_code, status.HTTP_200_OK)
+        target_release_id = target_response.data['results'][1]['release_id']
+
+        response = self.client.get(reverse('releaserpmmapping-detail',
+                                           args=[target_release_id, 'bash']))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        response = self.client.post(reverse('overridesrpmclone-list'),
+                                    {'source_release_id': 'release-1.0',
+                                     'target_release_id': target_release_id},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        # After clone, target release can work with release_mapping method
+        response = self.client.get(reverse('releaserpmmapping-detail',
+                                           args=[target_release_id, 'bash']))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
 class ComposeRPMViewAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
     fixtures = [
         "pdc/apps/common/fixtures/test/sigkey.json",
     ]
 
     def setUp(self):
-        with open('pdc/apps/release/fixtures/tests/composeinfo.json', 'r') as f:
+        with open('pdc/apps/release/fixtures/tests/composeinfo-0.3.json', 'r') as f:
             self.compose_info = json.loads(f.read())
-        with open('pdc/apps/compose/fixtures/tests/rpm-manifest.json', 'r') as f:
-            self.manifest = json.loads(f.read())
+        with open('pdc/apps/compose/fixtures/tests/rpms-1.0.json', 'r') as f:
+            self.manifest10 = json.loads(f.read())
+        with open('pdc/apps/compose/fixtures/tests/rpms-1.2.json', 'r') as f:
+            self.manifest12 = json.loads(f.read())
         self.client.post(reverse('releaseimportcomposeinfo-list'),
                          self.compose_info, format='json')
         # Caching ids makes it faster, but the cache needs to be cleared for each test.
@@ -719,86 +1001,370 @@ class ComposeRPMViewAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
         common_models.SigKey.CACHE = {}
 
     def test_import_inconsistent_data(self):
-        self.manifest['payload']['compose']['id'] = 'TP-1.0-20150315.0'
+        self.manifest10['payload']['compose']['id'] = 'TP-1.0-20150315.0'
         response = self.client.post(reverse('composerpm-list'),
-                                    {'rpm_manifest': self.manifest,
+                                    {'rpm_manifest': self.manifest10,
                                      'release_id': 'tp-1.0',
                                      'composeinfo': self.compose_info},
                                     format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_import_and_retrieve_manifest(self):
+    def test_import_and_retrieve_manifest_1_0(self):
+        self.assertEqual(models.ComposeRelPath.objects.count(), 0)
         response = self.client.post(reverse('composerpm-list'),
-                                    {'rpm_manifest': self.manifest,
+                                    {'rpm_manifest': self.manifest10,
                                      'release_id': 'tp-1.0',
                                      'composeinfo': self.compose_info},
                                     format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertNumChanges([11, 5])
+        self.assertEqual(response.data.get('compose'), 'TP-1.0-20150310.0')
+        self.assertEqual(response.data.get('imported rpms'), 6)
+        self.assertNumChanges([11, 70])
         self.assertEqual(models.ComposeRPM.objects.count(), 6)
+        self.assertGreater(models.ComposeRelPath.objects.count(), 0)
         response = self.client.get(reverse('composerpm-detail', args=['TP-1.0-20150310.0']))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertDictEqual(dict(response.data),
-                             self.manifest)
+                             self.manifest12)
+
+        response = self.client.post(reverse('composerpm-list'),
+                                    {'rpm_manifest': self.manifest10,
+                                     'release_id': 'tp-1.0',
+                                     'composeinfo': self.compose_info},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data.get('compose'), 'TP-1.0-20150310.0')
+        self.assertEqual(response.data.get('imported rpms'), 6)
+
+    def test_import_and_retrieve_manifest_1_2(self):
+        self.assertEqual(models.ComposeRelPath.objects.count(), 0)
+        response = self.client.post(reverse('composerpm-list'),
+                                    {'rpm_manifest': self.manifest12,
+                                     'release_id': 'tp-1.0',
+                                     'composeinfo': self.compose_info},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data.get('compose'), 'TP-1.0-20150310.0')
+        self.assertEqual(response.data.get('imported rpms'), 6)
+        self.assertNumChanges([11, 70])
+        self.assertEqual(models.ComposeRPM.objects.count(), 6)
+        self.assertGreater(models.ComposeRelPath.objects.count(), 0)
+        response = self.client.get(reverse('composerpm-detail', args=['TP-1.0-20150310.0']))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertDictEqual(dict(response.data),
+                             self.manifest12)
+
+        response = self.client.post(reverse('composerpm-list'),
+                                    {'rpm_manifest': self.manifest12,
+                                     'release_id': 'tp-1.0',
+                                     'composeinfo': self.compose_info},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data.get('compose'), 'TP-1.0-20150310.0')
+        self.assertEqual(response.data.get('imported rpms'), 6)
+
+    def test_import_manifest_with_extra_param(self):
+        response = self.client.post(reverse('composerpm-list'),
+                                    {'rpm_manifest': self.manifest10,
+                                     'release_id': 'tp-1.0',
+                                     'composeinfo': self.compose_info,
+                                     'fake_key': 'fake_value'},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
 
 class ComposeImageAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
     def setUp(self):
-        with open('pdc/apps/release/fixtures/tests/composeinfo.json', 'r') as f:
+        with open('pdc/apps/release/fixtures/tests/composeinfo-0.3.json', 'r') as f:
             self.compose_info = json.loads(f.read())
-        with open('pdc/apps/compose/fixtures/tests/image-manifest.json', 'r') as f:
-            self.manifest = json.loads(f.read())
+        with open('pdc/apps/compose/fixtures/tests/images-1.0.json', 'r') as f:
+            self.manifest10 = json.loads(f.read())
+        with open('pdc/apps/compose/fixtures/tests/images-1.2.json', 'r') as f:
+            self.manifest12 = json.loads(f.read())
         self.client.post(reverse('releaseimportcomposeinfo-list'),
                          self.compose_info, format='json')
         # Caching ids makes it faster, but the cache needs to be cleared for each test.
         models.Path.CACHE = {}
 
-    def test_import_images_by_deprecated_api(self):
-        # TODO: remove this test after next release
-        response = self.client.post(reverse('composeimportimages-list'),
-                                    {'image_manifest': self.manifest,
-                                     'release_id': 'tp-1.0',
-                                     'composeinfo': self.compose_info},
-                                    format='json')
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertNumChanges([11, 5])
-        self.assertEqual(models.ComposeImage.objects.count(), 4)
-        response = self.client.get(reverse('image-list'), {'compose': 'TP-1.0-20150310.0'})
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data.get('count'), 4)
-
-    def test_import_images(self):
+    def test_import_images_1_0(self):
+        self.assertEqual(models.ComposeRelPath.objects.count(), 0)
         response = self.client.post(reverse('composeimage-list'),
-                                    {'image_manifest': self.manifest,
+                                    {'image_manifest': self.manifest10,
                                      'release_id': 'tp-1.0',
                                      'composeinfo': self.compose_info},
                                     format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertNumChanges([11, 5])
+        self.assertEqual(response.data.get('compose'), 'TP-1.0-20150310.0')
+        self.assertEqual(response.data.get('imported images'), 4)
+        self.assertNumChanges([11, 70])
         self.assertEqual(models.ComposeImage.objects.count(), 4)
         response = self.client.get(reverse('image-list'), {'compose': 'TP-1.0-20150310.0'})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data.get('count'), 4)
+        self.assertGreater(models.ComposeRelPath.objects.count(), 0)
+
+        response = self.client.post(reverse('composeimage-list'),
+                                    {'image_manifest': self.manifest10,
+                                     'release_id': 'tp-1.0',
+                                     'composeinfo': self.compose_info},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data.get('compose'), 'TP-1.0-20150310.0')
+        self.assertEqual(response.data.get('imported images'), 4)
+
+    def test_import_images_with_extra_param(self):
+        response = self.client.post(reverse('composeimage-list'),
+                                    {'image_manifest': self.manifest10,
+                                     'release_id': 'tp-1.0',
+                                     'composeinfo': self.compose_info,
+                                     'fake_key': 'fake_value'},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_import_inconsistent_data(self):
-        self.manifest['payload']['compose']['id'] = 'TP-1.0-20150315.0'
+        self.manifest10['payload']['compose']['id'] = 'TP-1.0-20150315.0'
         response = self.client.post(reverse('composeimage-list'),
-                                    {'image_manifest': self.manifest,
+                                    {'image_manifest': self.manifest10,
                                      'release_id': 'tp-1.0',
                                      'composeinfo': self.compose_info},
                                     format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_import_and_retrieve_images(self):
+    def test_import_and_retrieve_images_1_0(self):
         response = self.client.post(reverse('composeimage-list'),
-                                    {'image_manifest': self.manifest,
+                                    {'image_manifest': self.manifest10,
                                      'release_id': 'tp-1.0',
                                      'composeinfo': self.compose_info},
                                     format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         response = self.client.get(reverse('composeimage-detail', args=['TP-1.0-20150310.0']))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertDictEqual(dict(response.data), self.manifest)
+        self.assertDictEqual(dict(response.data), self.manifest12)
+
+    def test_import_and_retrieve_images_1_2(self):
+        response = self.client.post(reverse('composeimage-list'),
+                                    {'image_manifest': self.manifest12,
+                                     'release_id': 'tp-1.0',
+                                     'composeinfo': self.compose_info},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        response = self.client.get(reverse('composeimage-detail', args=['TP-1.0-20150310.0']))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertDictEqual(dict(response.data), self.manifest12)
+
+
+class ComposeFullImportViewAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
+    fixtures = [
+        "pdc/apps/compose/fixtures/tests/location.json",
+        "pdc/apps/compose/fixtures/tests/scheme.json",
+    ]
+
+    def setUp(self):
+        with open('pdc/apps/release/fixtures/tests/composeinfo-0.3.json', 'r') as f:
+            self.compose_info = json.loads(f.read())
+        with open('pdc/apps/compose/fixtures/tests/rpms-1.0.json', 'r') as f:
+            self.rpm_manifest = json.loads(f.read())
+        with open('pdc/apps/compose/fixtures/tests/rpms-1.1.json', 'r') as f:
+            self.rpms11 = json.loads(f.read())
+        with open('pdc/apps/compose/fixtures/tests/rpms-1.2.json', 'r') as f:
+            self.rpms12 = json.loads(f.read())
+        with open('pdc/apps/compose/fixtures/tests/images-1.0.json', 'r') as f:
+            self.image_manifest = json.loads(f.read())
+        with open('pdc/apps/compose/fixtures/tests/images-1.1.json', 'r') as f:
+            self.images11 = json.loads(f.read())
+        with open('pdc/apps/compose/fixtures/tests/images-1.2.json', 'r') as f:
+            self.images12 = json.loads(f.read())
+        self.client.post(reverse('releaseimportcomposeinfo-list'),
+                         self.compose_info, format='json')
+        # Caching ids makes it faster, but the cache needs to be cleared for each test.
+        models.Path.CACHE = {}
+        common_models.SigKey.CACHE = {}
+
+    def test_import_and_retrieve_manifest_1_0(self):
+        response = self.client.post(reverse('composefullimport-list'),
+                                    {'rpm_manifest': self.rpm_manifest,
+                                     'image_manifest': self.image_manifest,
+                                     'release_id': 'tp-1.0',
+                                     'composeinfo': self.compose_info,
+                                     'location': 'NAY',
+                                     'scheme': 'http',
+                                     'url': 'abc.com'},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data.get('compose'), 'TP-1.0-20150310.0')
+        self.assertEqual(response.data.get('imported rpms'), 6)
+        self.assertEqual(response.data.get('imported images'), 4)
+        self.assertNumChanges([11, 72])
+        self.assertEqual(models.ComposeRPM.objects.count(), 6)
+        self.assertEqual(models.ComposeImage.objects.count(), 4)
+
+        response = self.client.get(reverse('composerpm-detail', args=['TP-1.0-20150310.0']))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertDictEqual(dict(response.data),
+                             self.rpms12)
+
+        response = self.client.get(reverse('composeimage-detail', args=['TP-1.0-20150310.0']))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertDictEqual(dict(response.data),
+                             self.images12)
+
+        response = self.client.get(reverse('composetreelocations-list'), {})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 5)
+
+        # test if data already there
+        response = self.client.post(reverse('composefullimport-list'),
+                                    {'rpm_manifest': self.rpm_manifest,
+                                     'image_manifest': self.image_manifest,
+                                     'release_id': 'tp-1.0',
+                                     'composeinfo': self.compose_info,
+                                     'location': 'NAY',
+                                     'scheme': 'http',
+                                     'url': 'abc.com'},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data.get('compose'), 'TP-1.0-20150310.0')
+        self.assertEqual(response.data.get('imported rpms'), 6)
+        self.assertEqual(response.data.get('imported images'), 4)
+        response = self.client.get(reverse('composetreelocations-list'), {})
+        self.assertEqual(response.data['count'], 5)
+
+    def test_import_and_retrieve_manifest_1_2(self):
+        response = self.client.post(reverse('composefullimport-list'),
+                                    {'rpm_manifest': self.rpms12,
+                                     'image_manifest': self.images12,
+                                     'release_id': 'tp-1.0',
+                                     'composeinfo': self.compose_info,
+                                     'location': 'NAY',
+                                     'scheme': 'http',
+                                     'url': 'abc.com'},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data.get('compose'), 'TP-1.0-20150310.0')
+        self.assertEqual(response.data.get('imported rpms'), 6)
+        self.assertEqual(response.data.get('imported images'), 4)
+        self.assertNumChanges([11, 72])
+        self.assertEqual(models.ComposeRPM.objects.count(), 6)
+        self.assertEqual(models.ComposeImage.objects.count(), 4)
+
+        response = self.client.get(reverse('composerpm-detail', args=['TP-1.0-20150310.0']))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.maxDiff = None
+        self.assertDictEqual(dict(response.data),
+                             self.rpms12)
+
+        response = self.client.get(reverse('composeimage-detail', args=['TP-1.0-20150310.0']))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertDictEqual(dict(response.data),
+                             self.images12)
+
+        response = self.client.get(reverse('composetreelocations-list'), {})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 5)
+
+        # test if data already there
+        response = self.client.post(reverse('composefullimport-list'),
+                                    {'rpm_manifest': self.rpm_manifest,
+                                     'image_manifest': self.image_manifest,
+                                     'release_id': 'tp-1.0',
+                                     'composeinfo': self.compose_info,
+                                     'location': 'NAY',
+                                     'scheme': 'http',
+                                     'url': 'abc.com'},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data.get('compose'), 'TP-1.0-20150310.0')
+        self.assertEqual(response.data.get('imported rpms'), 6)
+        self.assertEqual(response.data.get('imported images'), 4)
+        response = self.client.get(reverse('composetreelocations-list'), {})
+        self.assertEqual(response.data['count'], 5)
+
+    def test_import_manifest_with_extra_param(self):
+        response = self.client.post(reverse('composefullimport-list'),
+                                    {'rpm_manifest': self.rpms12,
+                                     'image_manifest': self.images12,
+                                     'release_id': 'tp-1.0',
+                                     'composeinfo': self.compose_info,
+                                     'location': 'NAY',
+                                     'scheme': 'http',
+                                     'url': 'abc.com',
+                                     'fake_key': 'fake_value'},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_import_if_rpm_manifest_inconsistent(self):
+        self.rpms12['payload']['compose']['id'] = 'TP-1.0-20150315.0'
+        response = self.client.post(reverse('composefullimport-list'),
+                                    {'rpm_manifest': self.rpms12,
+                                     'image_manifest': self.images12,
+                                     'release_id': 'tp-1.0',
+                                     'composeinfo': self.compose_info,
+                                     'location': 'NAY',
+                                     'scheme': 'http',
+                                     'url': 'abc.com'},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        response = self.client.get(reverse('composerpm-detail', args=['TP-1.0-20150310.0']))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        # rpm manifest inconsistent image should not be imported also.
+        response = self.client.get(reverse('composeimage-detail', args=['TP-1.0-20150310.0']))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        # compose tree location not set
+        response = self.client.get(reverse('composetreelocations-list'), {})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_import_if_image_manifest_inconsistent(self):
+        self.images12['payload']['compose']['id'] = 'TP-1.0-20150315.0'
+        response = self.client.post(reverse('composefullimport-list'),
+                                    {'rpm_manifest': self.rpms12,
+                                     'image_manifest': self.images12,
+                                     'release_id': 'tp-1.0',
+                                     'composeinfo': self.compose_info,
+                                     'location': 'NAY',
+                                     'scheme': 'http',
+                                     'url': 'abc.com'},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        response = self.client.get(reverse('composeimage-detail', args=['TP-1.0-20150310.0']))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        # image manifest inconsistent rpm should not be imported also.
+        response = self.client.get(reverse('composerpm-detail', args=['TP-1.0-20150310.0']))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        # compose tree location not set
+        response = self.client.get(reverse('composetreelocations-list'), {})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_import_if_set_compose_tree_location_failed(self):
+        response = self.client.post(reverse('composefullimport-list'),
+                                    {'rpm_manifest': self.rpm_manifest,
+                                     'image_manifest': self.image_manifest,
+                                     'release_id': 'tp-1.0',
+                                     'composeinfo': self.compose_info,
+                                     'location': 'fake_location',
+                                     'scheme': 'fate_scheme',
+                                     'url': 'abc.com'},
+                                    format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        response = self.client.get(reverse('composeimage-detail', args=['TP-1.0-20150310.0']))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        # image manifest inconsistent rpm should not be imported also.
+        response = self.client.get(reverse('composerpm-detail', args=['TP-1.0-20150310.0']))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        # compose tree location not set
+        response = self.client.get(reverse('composetreelocations-list'), {})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
 
 
 class RPMMappingAPITestCase(APITestCase):
@@ -881,6 +1447,67 @@ class RPMMappingAPITestCase(APITestCase):
                                               do_not_delete=False, comment="")
         self.assertIsNotNone(orpm)
 
+    def test_partial_update_with_illegal_action(self):
+        self.client.force_authenticate(create_user("user", perms=[]))
+        response = self.client.patch(self.url, [{"action": "fake_action", "srpm_name": "bash", "rpm_name": "bash-magic",
+                                                 "rpm_arch": "src", "variant": "Client", "arch": "x86_64",
+                                                 "do_not_delete": False, "comment": "", "include": True}],
+                                     format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {"detail": "action should only be 'create' or 'delete'"})
+
+    def test_partial_update_with_action_not_create_and_with_include_field(self):
+        self.client.force_authenticate(create_user("user", perms=[]))
+        response = self.client.patch(self.url, [{"action": "delete", "srpm_name": "bash", "rpm_name": "bash-magic",
+                                                 "rpm_arch": "src", "variant": "Client", "arch": "x86_64",
+                                                 "do_not_delete": False, "comment": "", "include": True}],
+                                     format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_partial_update_with_action_delete_and_with_no_include_parameter(self):
+        self.client.force_authenticate(create_user("user", perms=[]))
+        response = self.client.patch(self.url, [{"action": "delete", "srpm_name": "bash", "rpm_name": "bash-magic",
+                                                 "rpm_arch": "src", "variant": "Client", "arch": "x86_64",
+                                                 "do_not_delete": False, "comment": ""}],
+                                     format='json')
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+    def test_partial_update_without_enough_inputs(self):
+        self.client.force_authenticate(create_user("user", perms=[]))
+        response = self.client.patch(self.url, [{"action": "create", "rpm_name": "bash-magic",
+                                                 "rpm_arch": "src", "variant": "Client", "arch": "x86_64",
+                                                 "do_not_delete": False, "comment": "", "include": True}],
+                                     format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {"detail": "Not all fields specified"})
+
+    def test_partial_update_without_include(self):
+        self.client.force_authenticate(create_user("user", perms=[]))
+        response = self.client.patch(self.url, [{"action": "create", "srpm_name": "bash", "rpm_name": "bash-magic",
+                                                 "rpm_arch": "src", "variant": "Client", "arch": "x86_64",
+                                                 "do_not_delete": False, "comment": ""}],
+                                     format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {"detail": "No field 'include' when 'action' is create"})
+
+    def test_partial_update_with_invalid_inputs(self):
+        self.client.force_authenticate(create_user("user", perms=[]))
+        response = self.client.patch(self.url, [{"action": "create", "srpm_name": "bash", "rpm_name": "bash-magic",
+                                                 "rpm_arch": "src", "variant": "Client", "arch": "x86_64",
+                                                 "do_not_delete": False, "fake1": "", "fake2": True}],
+                                     format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {"detail": "Fields [u'fake1', u'fake2'] are not valid inputs"})
+
+    def test_partial_update_with_wrong_input_format(self):
+        self.client.force_authenticate(create_user("user", perms=[]))
+        response = self.client.patch(self.url, {"action": "create", "srpm_name": "bash", "rpm_name": "bash-magic",
+                                                "rpm_arch": "src", "variant": "Client", "arch": "x86_64",
+                                                "do_not_delete": False, "comment": "", "include": True},
+                                     format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {"detail": "Wrong input format"})
+
     def test_update(self):
         self.client.force_authenticate(create_user("user", perms=[]))
         new_mapping = {'Server': {'x86_64': {'bash': ['x86_64', 'i386']}}}
@@ -891,6 +1518,14 @@ class RPMMappingAPITestCase(APITestCase):
                                           'include': True, 'release_id': 'release-1.0'}])
         self.assertEqual(0, models.OverrideRPM.objects.filter(rpm_arch='i386').count())
 
+    def test_update_with_wrong_data_format(self):
+        self.client.force_authenticate(create_user("user", perms=[]))
+        new_mapping = {"action": "delete", "srpm_name": "bash", "rpm_name": "bash-magic",
+                       "rpm_arch": "src", "variant": "Client", "arch": "x86_64",
+                       "do_not_delete": False, "comment": ""}
+        response = self.client.put(self.url, new_mapping, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
     def test_update_with_perform(self):
         self.client.force_authenticate(create_user("user", perms=[]))
         new_mapping = {'Server': {'x86_64': {'bash': ['x86_64', 'i386']}}}
@@ -900,6 +1535,26 @@ class RPMMappingAPITestCase(APITestCase):
                                           'rpm_arch': 'i386', 'variant': 'Server', 'arch': 'x86_64',
                                           'include': True, 'release_id': 'release-1.0'}])
         self.assertEqual(1, models.OverrideRPM.objects.filter(rpm_arch='i386').count())
+
+    def test_update_with_wrong_input(self):
+        self.client.force_authenticate(create_user("user", perms=[]))
+        new_mapping = {'wronginput': '1'}
+        response = self.client.put(self.url, new_mapping, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['detail'], 'The parameters\' format for updating is wrong. '
+                                                  'Please read API documentation')
+
+        new_mapping = {'wronginput': {}}
+        response = self.client.put(self.url, new_mapping, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['detail'], 'The parameters\' format for updating is wrong. '
+                                                  'Please read API documentation')
+
+        new_mapping = {'wronginput': {'key1': 'value1', 'key2': 'value2'}}
+        response = self.client.put(self.url, new_mapping, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['detail'], 'The parameters\' format for updating is wrong. '
+                                                  'Please read API documentation')
 
 
 class FilterBugzillaProductsAndComponentsTestCase(APITestCase):
@@ -1045,6 +1700,7 @@ class OverrideManagementTestCase(TestCase):
         "pdc/apps/compose/fixtures/tests/variant_arch.json",
         "pdc/apps/compose/fixtures/tests/compose_overriderpm.json",
         "pdc/apps/compose/fixtures/tests/compose.json",
+        "pdc/apps/compose/fixtures/tests/more_releases.json",
         "pdc/apps/compose/fixtures/tests/compose_composerpm.json",
     ]
 
@@ -1081,6 +1737,11 @@ class OverrideManagementTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         # There is one package in fixtures
         self.assertEqual(len(response.context['forms']), 1)
+
+    def test_release_without_compose(self):
+        client = Client()
+        response = client.get('/override/manage/release-1.0-updates/?package=')
+        self.assertEqual(response.status_code, 200)
 
     def test_submit_no_changes(self):
         client = Client()
@@ -1835,14 +2496,9 @@ class ComposeTreeAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
         "pdc/apps/compose/fixtures/tests/location.json",
         "pdc/apps/compose/fixtures/tests/scheme.json",
         "pdc/apps/compose/fixtures/tests/compose.json",
+        "pdc/apps/compose/fixtures/tests/more_composes_variants.json",
         "pdc/apps/compose/fixtures/tests/composetree.json",
     ]
-
-    def setUp(self):
-        self.compose = models.Compose.objects.get(compose_id='compose-1')
-        self.variant = models.Variant.objects.get(variant_uid='Server')
-        self.location = models.Location.objects.get(short='NAY')
-        self.scheme = models.Scheme.objects.get(name='nfs')
 
     def test_list(self):
         response = self.client.get(reverse('composetreelocations-list'), {})
@@ -1899,6 +2555,14 @@ class ComposeTreeAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 0)
 
+    def test_query_multi_values_and_case_insensitive(self):
+        response = self.client.get(reverse('composetreelocations-list') + "?location=NAY&location=BRQ")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+        response = self.client.get(reverse('composetreelocations-list') + "?variant=SERver&variant=serVer2")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+
     def test_create_composetree(self):
         url = reverse('composetreelocations-list')
         data = {'compose': 'compose-1', 'variant': 'Server', 'arch': 'x86_64', 'location': 'BRQ',
@@ -1906,6 +2570,45 @@ class ComposeTreeAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertNumChanges([1])
+
+    def test_create_composetree_with_diff_scheme(self):
+        url = reverse('composetreelocations-list')
+        data = {'compose': 'compose-1', 'variant': 'Server', 'arch': 'x86_64', 'location': 'BRQ',
+                'url': 'nfs://nay.lab.la/', 'scheme': 'nfs', 'synced_content': ['debug']}
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        data = {'compose': 'compose-1', 'variant': 'Server', 'arch': 'x86_64', 'location': 'BRQ',
+                'url': 'nfs://nay.lab.la/', 'scheme': 'http', 'synced_content': ['debug']}
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_create_composetree_without_compose(self):
+        url = reverse('composetreelocations-list')
+        data = {'variant': 'Server', 'arch': 'x86_64', 'location': 'BRQ',
+                'url': 'nfs://nay.lab.la/', 'scheme': 'nfs', 'synced_content': ['debug']}
+        response = self.client.post(url, data, format='json')
+        self.assertEquals(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_composetree_without_variant(self):
+        url = reverse('composetreelocations-list')
+        data = {'compose': 'compose-1', 'arch': 'x86_64', 'location': 'BRQ',
+                'url': 'nfs://nay.lab.la/', 'scheme': 'nfs', 'synced_content': ['debug']}
+        response = self.client.post(url, data, format='json')
+        self.assertEquals(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_composetree_with_error_compose(self):
+        url = reverse('composetreelocations-list')
+        data = {'compose': 'xxxx', 'variant': 'Server', 'arch': 'x86_64', 'location': 'BRQ',
+                'url': 'nfs://nay.lab.la/', 'scheme': 'nfs', 'synced_content': ['debug']}
+        response = self.client.post(url, data, format='json')
+        self.assertEquals(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_create_composetree_with_extra_param(self):
+        url = reverse('composetreelocations-list')
+        data = {'compose': 'compose-1', 'variant': 'Server', 'arch': 'x86_64', 'location': 'BRQ',
+                'url': 'nfs://nay.lab.la/', 'scheme': 'nfs', 'synced_content': ['debug'], 'fake_key': 'fake_value'}
+        response = self.client.post(url, data, format='json')
+        self.assertEquals(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_create_composetree_default_syncedcontent(self):
         url = reverse('composetreelocations-list')
@@ -1943,19 +2646,19 @@ class ComposeTreeAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
 
     def test_detail(self):
         response = self.client.get(reverse('composetreelocations-detail',
-                                           args=['compose-1/Server/x86_64/NAY']))
+                                           args=['compose-1/Server/x86_64/NAY/nfs']))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['location'], 'NAY')
         self.assertEqual(response.data['synced_content'], ['binary'])
 
     def test_can_not_perform_full_update(self):
         response = self.client.put(reverse('composetreelocations-detail',
-                                           args=['compose-1/Server/x86_64/NAY']), {})
+                                           args=['compose-1/Server/x86_64/NAY/nfs']), {})
         self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
     def test_can_update_scheme(self):
         response = self.client.patch(reverse('composetreelocations-detail',
-                                             args=['compose-1/Server/x86_64/NAY']),
+                                             args=['compose-1/Server/x86_64/NAY/nfs']),
                                      {'scheme': 'http'})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data.get('scheme'), 'http')
@@ -1963,7 +2666,7 @@ class ComposeTreeAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
 
     def test_can_update_url(self):
         response = self.client.patch(reverse('composetreelocations-detail',
-                                             args=['compose-1/Server/x86_64/NAY']),
+                                             args=['compose-1/Server/x86_64/NAY/nfs']),
                                      {'url': 'http://example.com'})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data.get('url'), 'http://example.com')
@@ -1971,7 +2674,7 @@ class ComposeTreeAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
 
     def test_can_update_syncedcontent(self):
         response = self.client.patch(reverse('composetreelocations-detail',
-                                             args=['compose-1/Server/x86_64/NAY']),
+                                             args=['compose-1/Server/x86_64/NAY/nfs']),
                                      {'synced_content': ['binary', 'debug', 'source']})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data.get('synced_content'), ['binary', 'debug', 'source'])
@@ -1979,7 +2682,7 @@ class ComposeTreeAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
 
     def test_can_update_syncedcontent_duplicate(self):
         response = self.client.patch(reverse('composetreelocations-detail',
-                                             args=['compose-1/Server/x86_64/NAY']),
+                                             args=['compose-1/Server/x86_64/NAY/nfs']),
                                      {'synced_content': ['binary', 'debug', 'source', 'binary']})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data.get('synced_content'), ['binary', 'debug', 'source'])
@@ -1987,31 +2690,251 @@ class ComposeTreeAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
 
     def test_can_bulk_update_syncedcontent(self):
         url = reverse('composetreelocations-list')
-        data = {'compose-1/Server/x86_64/NAY': {'scheme': 'http', 'url': 'http://example.com', 'synced_content': ['binary', 'debug', 'source']},
-                'compose-1/Server2/x86_64/BRQ': {'scheme': 'http', 'url': 'http://example.com', 'synced_content': ['binary', 'debug', 'source']}}
+        data = {'compose-1/Server/x86_64/NAY/nfs': {'scheme': 'http', 'url': 'http://example.com', 'synced_content': ['binary', 'debug', 'source']},
+                'compose-1/Server2/x86_64/BRQ/nfs': {'scheme': 'http', 'url': 'http://example.com', 'synced_content': ['binary', 'debug', 'source']}}
         response = self.client.patch(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['compose-1/Server2/x86_64/BRQ'].get('synced_content'),
+        self.assertEqual(response.data['compose-1/Server2/x86_64/BRQ/nfs'].get('synced_content'),
                          ['binary', 'debug', 'source'])
         self.assertNumChanges([2])
 
     def test_delete_existing(self):
         response = self.client.delete(reverse('composetreelocations-detail',
-                                              args=['compose-1/Server/x86_64/NAY']))
+                                              args=['compose-1/Server/x86_64/NAY/nfs']))
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertEqual(models.ComposeTree.objects.count(), 1)
         self.assertNumChanges([1])
 
     def test_delete_non_existing(self):
         response = self.client.delete(reverse('composetreelocations-detail',
-                                              args=['compose-2/Server/x86_64/NAY']))
+                                              args=['compose-2/Server/x86_64/NAY/nfs']))
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(models.ComposeTree.objects.count(), 2)
         self.assertNumChanges([])
 
     def test_bulk_delete(self):
-        data = ['compose-1/Server/x86_64/NAY', 'compose-1/Server2/x86_64/BRQ']
+        data = ['compose-1/Server/x86_64/NAY/nfs', 'compose-1/Server2/x86_64/BRQ/nfs']
         response = self.client.delete(reverse('composetreelocations-list'), data, format='json')
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertEqual(models.ComposeTree.objects.count(), 0)
+        self.assertNumChanges([2])
+
+
+class ComposeTreeRTTTestAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
+    fixtures = [
+        "pdc/apps/release/fixtures/tests/release.json",
+        "pdc/apps/compose/fixtures/tests/variant.json",
+        "pdc/apps/compose/fixtures/tests/variant_arch.json",
+        "pdc/apps/compose/fixtures/tests/location.json",
+        "pdc/apps/compose/fixtures/tests/scheme.json",
+        "pdc/apps/compose/fixtures/tests/compose.json",
+        "pdc/apps/compose/fixtures/tests/more_composes_variants.json",
+        "pdc/apps/compose/fixtures/tests/composetree.json",
+    ]
+
+    def test_composetreertttest_list(self):
+        response = self.client.get(reverse('composetreertttests-list'), {})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.assertEqual(response.data['count'], 2)
+
+    def test_composetreertttest_query_composeid(self):
+        response = self.client.get(reverse('composetreertttests-list'), {"compose": "compose-1"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+
+    def test_composetreertttest_query_composeid_nonexisting(self):
+        response = self.client.get(reverse('composetreertttests-list'), {"compose": "does-not-exist"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_composetreertttest_query_variant(self):
+        response = self.client.get(reverse('composetreertttests-list'), {"variant": "Server"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+
+    def test_composetreertttest_query_variant_nonexisting(self):
+        response = self.client.get(reverse('composetreertttests-list'), {"variant": "does-not-exist"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_composetreertttest_query_arch(self):
+        response = self.client.get(reverse('composetreertttests-list'), {"arch": "x86_64"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+
+    def test_composetreertttest_query_arch_nonexisting(self):
+        response = self.client.get(reverse('composetreertttests-list'), {"arch": "does-not-exist"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_composetreertttest_query_test_result(self):
+        response = self.client.get(reverse('composetreertttests-list'), {"test_result": "untested"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+
+    def test_composetreertttest_query_test_result_nonexisting(self):
+        response = self.client.get(reverse('composetreertttests-list'), {"test_result": "does-not-exist"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_composetreertttest_detail(self):
+        response = self.client.get(reverse('composetreertttests-detail',
+                                           args=['compose-1/Server/x86_64']))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['test_result'], 'untested')
+
+    def test_composetreertttest_can_not_perform_full_update(self):
+        response = self.client.put(reverse('composetreertttests-detail',
+                                           args=['compose-1/Server/x86_64']), {})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_composetreertttest_can_not_update_other_fields(self):
+        response = self.client.patch(reverse('composetreertttests-detail',
+                                             args=['compose-1/Server/x86_64']),
+                                     {'arch': 'i386'})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertNumChanges([])
+
+    def test_composetreertttest_can_update_test_result(self):
+        response = self.client.patch(reverse('composetreertttests-detail',
+                                             args=['compose-1/Server/x86_64']),
+                                     {'test_result': 'passed'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('test_result'), 'passed')
+        self.assertNumChanges([1])
+
+    def test_composetreertttest_update_unknown_test_result_status(self):
+        response = self.client.patch(reverse('composetreertttests-detail',
+                                             args=['compose-1/Server/x86_64']),
+                                     {'test_result': 'unknown'})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data.get('test_result'),
+                         ["'unknown' is not allowed value. Use one of 'untested', 'passed', 'failed'."])
+        self.assertNumChanges([])
+
+    def test_composetreertttest_can_bulk_update_test_result(self):
+        url = reverse('composetreertttests-list')
+        data = {'compose-1/Server/x86_64': {'test_result': 'passed'},
+                'compose-1/Server2/x86_64': {'test_result': 'passed'}}
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['compose-1/Server/x86_64'].get('test_result'),
+                         'passed')
+        self.assertEqual(response.data['compose-1/Server2/x86_64'].get('test_result'),
+                         'passed')
+        self.assertNumChanges([2])
+
+
+class ComposeImageRTTTestAPITestCase(TestCaseWithChangeSetMixin, APITestCase):
+    fixtures = [
+        "pdc/apps/release/fixtures/tests/release.json",
+        "pdc/apps/compose/fixtures/tests/variant.json",
+        "pdc/apps/compose/fixtures/tests/variant_arch.json",
+        "pdc/apps/compose/fixtures/tests/compose.json",
+        'pdc/apps/package/fixtures/test/image.json',
+        "pdc/apps/compose/fixtures/tests/compose_composeimage.json",
+    ]
+
+    def test_list(self):
+        response = self.client.get(reverse('composeimagertttests-list'), {})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 3)
+
+    def test_query_composeid(self):
+        response = self.client.get(reverse('composeimagertttests-list'), {"compose": "compose-1"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 3)
+
+    def test_query_composeid_nonexisting(self):
+        response = self.client.get(reverse('composeimagertttests-list'), {"compose": "does-not-exist"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_query_variant(self):
+        response = self.client.get(reverse('composeimagertttests-list'), {"variant": "Server"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 3)
+
+    def test_query_variant_nonexisting(self):
+        response = self.client.get(reverse('composeimagertttests-list'), {"variant": "does-not-exist"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_query_arch(self):
+        response = self.client.get(reverse('composeimagertttests-list'), {"arch": "x86_64"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 3)
+
+    def test_query_arch_nonexisting(self):
+        response = self.client.get(reverse('composeimagertttests-list'), {"arch": "does-not-exist"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_query_image_file_name(self):
+        response = self.client.get(reverse('composeimagertttests-list'), {"file_name": "image-1"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+
+    def test_query_image_fiele_name_nonexisting(self):
+        response = self.client.get(reverse('composeimagertttests-list'), {"file_name": "does-not-exist"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_query_test_result(self):
+        response = self.client.get(reverse('composeimagertttests-list'), {"test_result": "untested"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 3)
+
+    def test_query_test_result_nonexisting(self):
+        response = self.client.get(reverse('composeimagertttests-list'), {"test_result": "does-not-exist"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_detail(self):
+        response = self.client.get(reverse('composeimagertttests-detail',
+                                           args=['compose-1/Server/x86_64/image-1']))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['file_name'], 'image-1')
+        self.assertEqual(response.data['test_result'], 'untested')
+
+    def test_can_not_perform_full_update(self):
+        response = self.client.put(reverse('composeimagertttests-detail',
+                                           args=['compose-1/Server/x86_64/image-1']), {})
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_can_not_update_other_fields(self):
+        response = self.client.patch(reverse('composeimagertttests-detail',
+                                             args=['compose-1/Server/x86_64/image-1']),
+                                     {'arch': 'i386'})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertNumChanges([])
+
+    def test_can_update_test_result(self):
+        response = self.client.patch(reverse('composeimagertttests-detail',
+                                             args=['compose-1/Server/x86_64/image-1']),
+                                     {'test_result': 'passed'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data.get('test_result'), 'passed')
+        self.assertNumChanges([1])
+
+    def test_update_unknown_test_result_status(self):
+        response = self.client.patch(reverse('composeimagertttests-detail',
+                                             args=['compose-1/Server/x86_64/image-1']),
+                                     {'test_result': 'unknown'})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data.get('test_result'),
+                         ["'unknown' is not allowed value. Use one of 'untested', 'passed', 'failed'."])
+        self.assertNumChanges([])
+
+    def test_can_bulk_update_test_result(self):
+        url = reverse('composeimagertttests-list')
+        data = {'compose-1/Server/x86_64/image-1': {'test_result': 'passed'},
+                'compose-1/Server/x86_64/image-2': {'test_result': 'passed'}}
+        response = self.client.patch(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['compose-1/Server/x86_64/image-1'].get('test_result'),
+                         'passed')
+        self.assertEqual(response.data['compose-1/Server/x86_64/image-2'].get('test_result'),
+                         'passed')
         self.assertNumChanges([2])

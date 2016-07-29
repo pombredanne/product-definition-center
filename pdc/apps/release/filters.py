@@ -6,10 +6,10 @@
 import django_filters
 
 from pdc.apps.common import filters
-from .models import Release, ProductVersion, Product, ReleaseType, Variant
+from .models import Release, ProductVersion, Product, ReleaseType, Variant, BaseProduct, ReleaseGroup
 
 
-class ActiveReleasesFilter(django_filters.BooleanFilter):
+class ActiveReleasesFilter(filters.CaseInsensitiveBooleanFilter):
     """
     Filter objects depending on whether their releases are active or not. If
     active=True, it will only keep objects with at least one active release.
@@ -18,19 +18,27 @@ class ActiveReleasesFilter(django_filters.BooleanFilter):
     the object.
     """
     def filter(self, qs, value):
+        if not value:
+            return qs
+        self._validate_boolean(value)
         name = self.name + '__active'
-        if value:
+        if value.lower() in self.TRUE_STRINGS:
             return qs.filter(**{name: True}).distinct()
         else:
             return qs.exclude(**{name: True}).distinct()
 
 
 class ReleaseFilter(django_filters.FilterSet):
-    base_product = django_filters.CharFilter(name='base_product__base_product_id')
+    release_id = filters.MultiValueFilter(name='release_id')
+    base_product = filters.MultiValueFilter(name='base_product__base_product_id')
     has_base_product = django_filters.MethodFilter(action='find_has_base_product')
-    release_type = django_filters.CharFilter(name='release_type__short')
-    product_version = django_filters.CharFilter(name='product_version__product_version_id')
+    release_type = filters.MultiValueFilter(name='release_type__short')
+    product_version = filters.MultiValueFilter(name='product_version__product_version_id')
     integrated_with = filters.NullableCharFilter(name='integrated_with__release_id')
+    active = filters.CaseInsensitiveBooleanFilter()
+    name = filters.MultiValueFilter(name='name')
+    short = filters.MultiValueFilter(name='short')
+    version = filters.MultiValueFilter(name='version')
 
     class Meta:
         model = Release
@@ -48,8 +56,23 @@ class ReleaseFilter(django_filters.FilterSet):
         return queryset
 
 
+class BaseProductFilter(django_filters.FilterSet):
+    short               = filters.MultiValueFilter(name='short')
+    version             = filters.MultiValueFilter(name='version')
+    name                = filters.MultiValueFilter(name='name')
+    base_product_id     = filters.MultiValueFilter(name='base_product_id')
+
+    class Meta:
+        model = BaseProduct
+        fields = ("base_product_id", "short", "version", 'name')
+
+
 class ProductVersionFilter(django_filters.FilterSet):
-    active = ActiveReleasesFilter(name='release')
+    active              = ActiveReleasesFilter(name='release')
+    short               = filters.MultiValueFilter(name='short')
+    version             = filters.MultiValueFilter(name='version')
+    name                = filters.MultiValueFilter(name='name')
+    product_version_id  = filters.MultiValueFilter(name='product_version_id')
 
     class Meta:
         model = ProductVersion
@@ -58,6 +81,8 @@ class ProductVersionFilter(django_filters.FilterSet):
 
 class ProductFilter(django_filters.FilterSet):
     active = ActiveReleasesFilter(name='productversion__release')
+    name = filters.MultiValueFilter(name='name')
+    short = filters.MultiValueFilter(name='short')
 
     class Meta:
         model = Product
@@ -66,7 +91,7 @@ class ProductFilter(django_filters.FilterSet):
 
 class ReleaseTypeFilter(django_filters.FilterSet):
     name = django_filters.CharFilter(lookup_type="icontains")
-    short = django_filters.CharFilter()
+    short = filters.MultiValueFilter(name='short')
 
     class Meta:
         model = ReleaseType
@@ -83,3 +108,15 @@ class ReleaseVariantFilter(django_filters.FilterSet):
     class Meta:
         model = Variant
         fields = ('release', 'id', 'uid', 'name', 'type')
+
+
+class ReleaseGroupFilter(django_filters.FilterSet):
+    name           = filters.MultiValueFilter(name='name')
+    description    = filters.MultiValueFilter(name='description')
+    type           = filters.MultiValueFilter(name='type__name')
+    releases       = filters.MultiValueFilter(name='releases__release_id')
+    active         = filters.CaseInsensitiveBooleanFilter()
+
+    class Meta:
+        model = ReleaseGroup
+        fields = ('name', 'description', 'type', 'releases', 'active')

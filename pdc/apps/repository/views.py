@@ -12,6 +12,8 @@ from django.shortcuts import get_object_or_404
 from . import models
 from . import serializers
 from . import filters
+from pdc.apps.auth.permissions import APIPermission
+from pdc.apps.common.constants import PUT_OPTIONAL_PARAM_WARNING
 from pdc.apps.common.viewsets import (ChangeSetCreateModelMixin, StrictQueryParamMixin,
                                       ChangeSetUpdateModelMixin, ChangeSetDestroyModelMixin)
 from pdc.apps.release.models import Release
@@ -28,19 +30,18 @@ class RepoViewSet(ChangeSetCreateModelMixin,
                   viewsets.GenericViewSet):
     """
     An API endpoint providing access to content delivery repositories.
-
-    Please access this endpoint by [%(HOST_NAME)s/%(API_PATH)s/content-delivery-repos/](/%(API_PATH)s/content-delivery-repos/).
-    Endpoint [%(HOST_NAME)s/%(API_PATH)s/repos/](/%(API_PATH)s/repos/) is deprecated.
     """
     queryset = models.Repo.objects.all().select_related().order_by('id')
     serializer_class = serializers.RepoSerializer
     filter_class = filters.RepoFilter
+    permission_classes = (APIPermission,)
+    docstring_macros = PUT_OPTIONAL_PARAM_WARNING
 
     def create(self, *args, **kwargs):
         """
         __Method__: `POST`
 
-        __URL__: $LINK:repo-list$
+        __URL__: $LINK:contentdeliveryrepos-list$
 
         __Data__:
 
@@ -51,20 +52,6 @@ class RepoViewSet(ChangeSetCreateModelMixin,
          * *repo_family*: $LINK:contentdeliveryrepofamily-list$
          * *service*: $LINK:contentdeliveryservice-list$
 
-        There are additional validations for the content delivery repository name for specific
-        content category. If and only if the content category is `debug`, the
-        name must contain `debug` substring.
-
-        The name must also match type of associated release by having a
-        specific substring.
-
-            release type  | name substring
-            --------------+---------------
-            fast          | -fast
-            eus           | .z
-            aus           | .aus or .ll
-            els           | els
-
         __Response__: Same as input data.
         """
         return super(RepoViewSet, self).create(*args, **kwargs)
@@ -73,7 +60,7 @@ class RepoViewSet(ChangeSetCreateModelMixin,
         """
         __Method__: `GET`
 
-        __URL__: $LINK:repo-detail:id$
+        __URL__: $LINK:contentdeliveryrepos-detail:id$
 
         __Response__:
 
@@ -85,7 +72,7 @@ class RepoViewSet(ChangeSetCreateModelMixin,
         """
         __Method__: `GET`
 
-        __URL__: $LINK:repo-list$
+        __URL__: $LINK:contentdeliveryrepos-list$
 
         __Query params__:
 
@@ -99,9 +86,11 @@ class RepoViewSet(ChangeSetCreateModelMixin,
 
     def update(self, *args, **kwargs):
         """
+        %(PUT_OPTIONAL_PARAM_WARNING)s
+
         __Method__: `PUT`, `PATCH`
 
-        __URL__: $LINK:repo-detail:id$
+        __URL__: $LINK:contentdeliveryrepos-detail:id$
 
         __Data__:
 
@@ -117,17 +106,18 @@ class RepoViewSet(ChangeSetCreateModelMixin,
         """
         __Method__: `DELETE`
 
-        __URL__: $LINK:repo-detail:id$
+        __URL__: $LINK:contentdeliveryrepos-detail:id$
         """
         return super(RepoViewSet, self).destroy(*args, **kwargs)
 
 
 class RepoCloneViewSet(StrictQueryParamMixin, viewsets.GenericViewSet):
     """
-    Please access this endpoint by [%(HOST_NAME)s/%(API_PATH)s/rpc/content-delivery-repos/clone/](/%(API_PATH)s/rpc/content-delivery-repos/clone/).
-    Endpoint [%(HOST_NAME)s/%(API_PATH)s/rpc/repos/clone/](/%(API_PATH)s/rpc/repos/clone/) is deprecated.
+    Please access this endpoint by $LINK:cdreposclone-list$.
+    Endpoint $LINK:repoclone-list$ is deprecated.
     """
     queryset = models.Repo.objects.none()   # Required for permissions
+    permission_classes = (APIPermission,)
 
     def create(self, request):
         """
@@ -248,10 +238,6 @@ class RepoFamilyViewSet(StrictQueryParamMixin,
     This page shows the usage of the **ContentDeliveryRepoFamily API**, please see the
     following for more details.
 
-
-    Please access this endpoint by [%(HOST_NAME)s/%(API_PATH)s/content-delivery-repo-families/](/%(API_PATH)s/content-delivery-repo-families/).
-    Endpoint [%(HOST_NAME)s/%(API_PATH)s/repo-families/](/%(API_PATH)s/repo-families/) is deprecated.
-
     ##Test tools##
 
     You can use ``curl`` in terminal, with -X _method_ (GET|POST|PUT|PATCH|DELETE),
@@ -261,6 +247,7 @@ class RepoFamilyViewSet(StrictQueryParamMixin,
     queryset = models.RepoFamily.objects.all().order_by('id')
     serializer_class = serializers.RepoFamilySerializer
     filter_class = filters.RepoFamilyFilter
+    permission_classes = (APIPermission,)
 
     def list(self, request, *args, **kwargs):
         """
@@ -307,14 +294,10 @@ class ContentCategoryViewSet(StrictQueryParamMixin,
                              viewsets.GenericViewSet):
     """
     API endpoint that allows content_category to be viewed.
-
-    Please access this endpoint by [%(HOST_NAME)s/%(API_PATH)s/content-delivery-content-categories/](/%(API_PATH)s/
-    content-delivery-content-categories/).
-    Endpoint [%(HOST_NAME)s/%(API_PATH)s/content-delivery-content-category/](/%(API_PATH)s/
-    content-delivery-content-category/) is deprecated.
     """
     serializer_class = serializers.ContentCategorySerializer
     queryset = models.ContentCategory.objects.all().order_by('id')
+    permission_classes = (APIPermission,)
 
     def list(self, request, *args, **kwargs):
         """
@@ -334,15 +317,10 @@ class ContentFormatViewSet(StrictQueryParamMixin,
                            viewsets.GenericViewSet):
     """
     API endpoint that allows content_format to be viewed.
-
-    Please access this endpoint by
-    [%(HOST_NAME)s/%(API_PATH)s/content-delivery-content-formats/](/%(API_PATH)s/content-delivery-content-formats/).
-    Endpoint
-    [%(HOST_NAME)s/%(API_PATH)s/content-delivery-content-format/](/%(API_PATH)s/content-delivery-content-format/)
-    is deprecated.
     """
     serializer_class = serializers.ContentFormatSerializer
     queryset = models.ContentFormat.objects.all().order_by('id')
+    permission_classes = (APIPermission,)
 
     def list(self, request, *args, **kwargs):
         """
@@ -362,14 +340,10 @@ class ServiceViewSet(StrictQueryParamMixin,
                      viewsets.GenericViewSet):
     """
     API endpoint that allows service to be viewed.
-
-    Please access this endpoint by
-    [%(HOST_NAME)s/%(API_PATH)s/content-delivery-services/](/%(API_PATH)s/content-delivery-services/).
-    Endpoint
-    [%(HOST_NAME)s/%(API_PATH)s/content-delivery-service/](/%(API_PATH)s/content-delivery-service/) is deprecated.
     """
     serializer_class = serializers.ServiceSerializer
     queryset = models.Service.objects.all().order_by('id')
+    permission_classes = (APIPermission,)
 
     def list(self, request, *args, **kwargs):
         """

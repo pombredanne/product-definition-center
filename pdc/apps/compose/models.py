@@ -3,11 +3,11 @@
 # Licensed under The MIT License (MIT)
 # http://opensource.org/licenses/MIT
 #
+from django.core.exceptions import ValidationError
 from django.db import models, connection, transaction
 from django.db.utils import IntegrityError
 
 from pdc.apps.common import models as common_models
-from pdc.apps.package import models as package_models
 from pdc.apps.common.hacks import add_returning
 
 from productmd import composeinfo
@@ -23,13 +23,13 @@ class ComposeType(models.Model):
 class ComposeAcceptanceTestingState(models.Model):
     name                = models.CharField(max_length=200, unique=True)
 
+    @staticmethod
+    def get_untested():
+        """Return default acceptance testing status."""
+        return ComposeAcceptanceTestingState.objects.get(name='untested').pk
+
     def __unicode__(self):
         return u"%s" % self.name
-
-
-def _get_untested():
-    """Return default acceptance testing status."""
-    return ComposeAcceptanceTestingState.objects.get(name='untested').pk
 
 
 class Compose(models.Model):
@@ -41,7 +41,8 @@ class Compose(models.Model):
     compose_label       = models.CharField(max_length=200, null=True, blank=True)
     dt_imported         = models.DateTimeField(auto_now_add=True)
     deleted             = models.BooleanField(default=False)
-    acceptance_testing  = models.ForeignKey(ComposeAcceptanceTestingState, default=_get_untested)
+    acceptance_testing  = models.ForeignKey(ComposeAcceptanceTestingState,
+                                            default=ComposeAcceptanceTestingState.get_untested)
     linked_releases     = models.ManyToManyField('release.Release', related_name='linked_composes', blank=True)
 
     class Meta:
@@ -86,10 +87,14 @@ class Compose(models.Model):
         """
         sigkeys = common_models.SigKey.objects.filter(composerpm__variant_arch__variant__compose=self).distinct()
         result = sorted([i.key_id for i in sigkeys])
-        if ComposeRPM.objects.filter(variant_arch__variant__compose=self, sigkey=None).exists():
+        if self.exist_unsigned:
             # detect unsigned RPMs
             result.append(None)
         return result
+
+    @property
+    def exist_unsigned(self):
+        return ComposeRPM.objects.filter(variant_arch__variant__compose=self, sigkey=None).exists()
 
     def get_rpm_mapping(self, package, disable_overrides=False, release=None):
         """
@@ -134,13 +139,14 @@ class Compose(models.Model):
         if not disable_overrides:
             useless_overrides = mapping.apply_overrides(overrides)
 
-        return (mapping, useless_overrides)
+        return mapping, useless_overrides
 
     def get_rpms(self, rpm_name):
         """
         Find all RPMs with given name associated with this compose.
         """
-        return (package_models.RPM.objects.filter(name=rpm_name)
+        from pdc.apps.package.models import RPM
+        return (RPM.objects.filter(name=rpm_name)
                 .filter(composerpm__variant_arch__variant__compose=self)
                 .distinct())
 
@@ -149,7 +155,8 @@ class Compose(models.Model):
         Get a mapping of all variant.archs to their testing status.
         """
         result = {}
-        for var_arch in VariantArch.objects.filter(variant__compose=self):
+        for var_arch in VariantArch.objects.filter(
+                variant__compose=self).select_related('variant', 'arch', 'rtt_testing_status'):
             variant = result.setdefault(var_arch.variant.variant_uid, {})
             variant[var_arch.arch.name] = var_arch.rtt_testing_status.name
         return result
@@ -200,7 +207,7 @@ class VariantArch(models.Model):
     variant             = models.ForeignKey(Variant)
     arch                = models.ForeignKey("common.Arch", related_name="+")
     rtt_testing_status  = models.ForeignKey(ComposeAcceptanceTestingState,
-                                            default=_get_untested)
+                                            default=ComposeAcceptanceTestingState.get_untested)
     deleted             = models.BooleanField(default=False)
 
     class Meta:
@@ -212,6 +219,14 @@ class VariantArch(models.Model):
     def __unicode__(self):
         return u"%s.%s" % (self.variant, self.arch)
 
+    def export(self):
+        return {
+            "compose": self.variant.compose.compose_id,
+            "variant": self.variant.variant_uid,
+            "arch": self.arch.name,
+            "rtt_testing_status": self.rtt_testing_status.name
+        }
+
 
 class Path(models.Model):
     """
@@ -222,6 +237,11 @@ class Path(models.Model):
 
     def __unicode__(self):
         return unicode(self.path)
+
+    def export(self):
+        return {
+            "path": self.path
+        }
 
     CACHE = {}
 
@@ -313,6 +333,13 @@ class ComposeRPMMapping(object):
             useless_overrides.append(override)
         else:
             to_be_deleted.append(override)
+
+    def get_rpm_mapping_only_with_overrides(self, package, disable_overrides, release):
+        useless_overrides = []
+        overrides = OverrideRPM.objects.filter(release=release).filter(srpm_name=package)
+        if not disable_overrides:
+            useless_overrides = self.apply_overrides(overrides)
+        return self, useless_overrides
 
     def apply_overrides(self, overrides, do_delete=True):
         tbd = []
@@ -490,9 +517,11 @@ class OverrideRPM(models.Model):
             else:
                 orpm.do_not_delete = True
                 orpm.comment = data.get('comment', '')
-                orpm.include = not data['include']
+                orpm.include = not orpm.include
                 orpm.save()
                 new_val = orpm.export()
+        else:
+            raise ValueError("action should only be 'create' or 'delete'")
         return pk, old_val, new_val
 
 
@@ -500,11 +529,40 @@ class ComposeImage(models.Model):
     variant_arch        = models.ForeignKey(VariantArch, db_index=True)
     image               = models.ForeignKey("package.Image", db_index=True)
     path                = models.ForeignKey(Path)
+    rtt_test_result     = models.ForeignKey(ComposeAcceptanceTestingState,
+                                            default=ComposeAcceptanceTestingState.get_untested)
 
     class Meta:
         unique_together = (
             ("variant_arch", "image"),
         )
+
+    def __unicode__(self):
+        return u"%s/%s" % (self.variant_arch.variant.compose, self.image)
+
+    def export(self):
+        return {
+            "compose": self.variant_arch.variant.compose.compose_id,
+            "variant": self.variant_arch.variant.variant_uid,
+            "arch": self.variant_arch.arch.name,
+            "file_name": self.image.file_name,
+            "path": self.path.path,
+            "test_result": self.rtt_test_result.name
+        }
+
+    def validate_unique(self, exclude=None):
+        super(ComposeImage, self).validate_unique(exclude=exclude)
+        # NOTE(xchu): we assume that for each compose in specific variant_arch,
+        #             the image `file_name` should be unique.
+        if not self.id:
+            qs = self.__class__.objects.filter(variant_arch=self.variant_arch,
+                                               image__file_name=self.image.file_name)
+            if qs.exists():
+                raise ValidationError(
+                    "Unique validation Error in ComposeImage. "
+                    "Compose(%s) with same Image file name(%s) already exists." % (
+                        self.variant_arch.variant.compose, self.image.file_name)
+                )
 
 
 class Location(models.Model):
@@ -527,7 +585,7 @@ class ComposeTree(models.Model):
 
     class Meta:
         unique_together = (
-            ("compose", "variant", "arch", "location"),
+            ("compose", "variant", "arch", "location", "scheme"),
         )
 
     def __unicode__(self):
@@ -542,4 +600,36 @@ class ComposeTree(models.Model):
             "scheme": self.scheme.name,
             "url": self.url,
             "synced_content": [item.name for item in self.synced_content.all()]
+        }
+
+
+class PathType(models.Model):
+    name = models.CharField(max_length=255, unique=True)
+
+    def __unicode__(self):
+        return self.name
+
+    def export(self):
+        return {
+            "name": self.name,
+        }
+
+
+class ComposeRelPath(models.Model):
+    path                = models.CharField(max_length=2000)
+    compose             = models.ForeignKey("Compose")
+    variant             = models.ForeignKey("Variant")
+    arch                = models.ForeignKey("common.Arch")
+    type                = models.ForeignKey("PathType")
+
+    def __unicode__(self):
+        return u"%s-%s-%s-%s-%s" % (self.compose, self.variant, self.arch, self.type.name, self.path)
+
+    def export(self):
+        return {
+            "compose": self.compose.compose_id,
+            "variant": self.variant.variant_uid,
+            "arch": self.arch.name,
+            "type": self.type.name,
+            "path": self.path
         }

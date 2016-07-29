@@ -5,7 +5,10 @@
 #
 from rest_framework import viewsets, mixins
 
+from contrib.bulk_operations import bulk_operations
 from pdc.apps.common import viewsets as pdc_viewsets
+from pdc.apps.common.constants import PUT_OPTIONAL_PARAM_WARNING
+from pdc.apps.auth.permissions import APIPermission
 from . import models
 from . import serializers
 from . import filters
@@ -23,6 +26,8 @@ class RPMViewSet(pdc_viewsets.StrictQueryParamMixin,
     queryset = models.RPM.objects.all().order_by("id")
     serializer_class = serializers.RPMSerializer
     filter_class = filters.RPMFilter
+    permission_classes = (APIPermission,)
+    docstring_macros = PUT_OPTIONAL_PARAM_WARNING
 
     def list(self, *args, **kwargs):
         """
@@ -53,6 +58,8 @@ class RPMViewSet(pdc_viewsets.StrictQueryParamMixin,
         exclude `python>3.1.0` or `python>3.0.0 && python <3.3.0`.
 
         Only single filter for each dependency type is allowed.
+
+        Multiple `name` regular expressions which will be OR-ed. Preferably use OR inside the regexp.
 
         __Response__: a paged list of following objects
 
@@ -102,6 +109,8 @@ class RPMViewSet(pdc_viewsets.StrictQueryParamMixin,
 
     def update(self, request, *args, **kwargs):
         """
+        %(PUT_OPTIONAL_PARAM_WARNING)s
+
         __Method__: `PUT`, `PATCH`
 
         __URL__: $LINK:rpms-detail:instance_pk$
@@ -132,6 +141,7 @@ class ImageViewSet(pdc_viewsets.StrictQueryParamMixin,
     queryset = models.Image.objects.all().order_by('id')
     serializer_class = serializers.ImageSerializer
     filter_class = filters.ImageFilter
+    permission_classes = (APIPermission,)
 
     def list(self, request):
         """
@@ -412,3 +422,113 @@ class BuildImageViewSet(pdc_viewsets.PDCModelViewSet):
             curl -X DELETE -H "Content-Type: application/json" $URL:buildimage-detail:1$
         """
         return super(BuildImageViewSet, self).destroy(request, *args, **kwargs)
+
+
+class BuildImageRTTTestsViewSet(pdc_viewsets.StrictQueryParamMixin,
+                                pdc_viewsets.ChangeSetUpdateModelMixin,
+                                pdc_viewsets.MultiLookupFieldMixin,
+                                mixins.RetrieveModelMixin,
+                                mixins.ListModelMixin,
+                                viewsets.GenericViewSet):
+    """
+    ViewSet for  BuildImage RTT Tests.
+    """
+    queryset = models.BuildImage.objects.all().order_by('id')
+    serializer_class = serializers.BuildImageRTTTestsSerializer
+    filter_class = filters.BuildImageRTTTestsFilter
+    permission_classes = (APIPermission,)
+    lookup_fields = (('image_id', r'[^/]+'),
+                     ('image_format__name', r'[^/]+'))
+
+    def list(self, request, *args, **kwargs):
+        """
+        __Method__: GET
+
+        __URL__: $LINK:buildimagertttests-list$
+
+        __Query params__:
+
+        %(FILTERS)s
+
+        __Response__:
+
+            # paged list
+            {
+              "count": int,
+              "next": url,
+              "previous": url,
+              "results": [
+                {
+                    "build_nvr":    string,
+                    "format":       string,
+                    "id":           int,
+                    "test_result":  string
+                },
+                ...
+              ]
+            }
+        """
+        return super(BuildImageRTTTestsViewSet, self).list(request, *args, **kwargs)
+
+    def retrieve(self, request, *args, **kwargs):
+        """
+        __Method__:
+        GET
+
+        __URL__: $LINK:buildimagertttests-detail:build_nvr}/{image_format$
+
+        __Response__:
+
+            {
+                "build_nvr":    string,
+                "format":       string,
+                "id":           int,
+                "test_result":  string
+            }
+        """
+        return super(BuildImageRTTTestsViewSet, self).retrieve(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        # This method is used by bulk update and partial update, but should not
+        # be called directly.
+        if not kwargs.get('partial', False):
+            return self.http_method_not_allowed(request, *args, **kwargs)
+
+        if not request.data:
+            return pdc_viewsets.NoEmptyPatchMixin.make_response()
+        return super(BuildImageRTTTestsViewSet, self).update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        """
+        Only `test_result` fields can be modified by this call.
+        Trying to change anything else will result in 400 BAD REQUEST response.
+
+        __Method__: PATCH
+
+        __URL__: $LINK:buildimagertttests-detail:build_nvr}/{image_format$
+
+        __Data__:
+
+            {
+                "test_result": string
+            }
+
+        __Response__:
+
+            {
+                "build_nvr":    string,
+                "format":       string,
+                "id":           int,
+                "test_result":  string
+            }
+        """
+        kwargs['partial'] = True
+        return self.update(request, *args, **kwargs)
+
+    def bulk_update(self, *args, **kwargs):
+        """
+        It is possible to perform bulk partial update on 'test_result' with `PATCH`
+        method. The request body should contain an object, where keys are identifiers
+        of objects to be modified and their values use the same format as normal patch.
+        """
+        return bulk_operations.bulk_update_impl(self, *args, **kwargs)

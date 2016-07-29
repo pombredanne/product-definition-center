@@ -9,6 +9,8 @@ import os
 import json
 
 import kobo
+import productmd
+from productmd.rpms import Rpms
 
 from django.db import transaction, connection
 from django.db.models import Q
@@ -22,8 +24,10 @@ from pdc.apps.repository import models as repository_models
 from pdc.apps.release import models as release_models
 from pdc.apps.release import lib
 from pdc.apps.compose import models
+from pdc.apps.compose.serializers import ComposeTreeSerializer
 from pdc.apps.release.models import Release
 from pdc.apps.component.models import ReleaseComponent
+from pdc.apps.repository.models import ContentCategory
 
 
 def _maybe_raise_inconsistency_error(composeinfo, manifest, name):
@@ -85,12 +89,49 @@ def _add_compose_create_msg(request, compose_obj):
     request._request._messagings.append(('.compose', json.dumps(msg)))
 
 
-@transaction.atomic
+def _add_import_msg(request, compose_obj, attribute, count):
+    """
+    Add import message to request._messagings.
+
+    - `attribute` should be something like 'images' or 'rpms'.
+    - `count` should indicate the number of those entities which were imported.
+    """
+    msg = {'attribute': attribute,
+           'count': count,
+           'action': 'import',
+           'compose_id': compose_obj.compose_id,
+           'compose_date': compose_obj.compose_date.isoformat(),
+           'compose_type': compose_obj.compose_type.name,
+           'compose_respin': compose_obj.compose_respin}
+    request._request._messagings.append(('.' + attribute, json.dumps(msg)))
+
+
+def _store_relative_path_for_compose(compose_obj, variants_info, variant, variant_obj, add_to_changelog):
+    vp = productmd.composeinfo.VariantPaths(variant)
+    common_hacks.deserialize_wrapper(vp.deserialize, variants_info.get(variant.name, {}).get('paths', {}))
+    for path_type in vp._fields:
+        path_type_obj, created = models.PathType.objects.get_or_create(name=path_type)
+        if created:
+            add_to_changelog.append(path_type_obj)
+        for arch in variant.arches:
+            field_value = getattr(vp, path_type)
+            if field_value and field_value.get(arch, None):
+                arch_obj = common_models.Arch.objects.get(name=arch)
+                crp_obj, created = models.ComposeRelPath.objects.get_or_create(arch=arch_obj, variant=variant_obj,
+                                                                               compose=compose_obj, type=path_type_obj,
+                                                                               path=field_value[arch])
+                if created:
+                    add_to_changelog.append(crp_obj)
+
+
+@transaction.atomic(savepoint=False)
 def compose__import_rpms(request, release_id, composeinfo, rpm_manifest):
     release_obj = release_models.Release.objects.get(release_id=release_id)
 
-    ci = common_hacks.deserialize_composeinfo(composeinfo)
-    rm = common_hacks.deserialize_rpms(rpm_manifest)
+    ci = productmd.composeinfo.ComposeInfo()
+    common_hacks.deserialize_wrapper(ci.deserialize, composeinfo)
+    rm = Rpms()
+    common_hacks.deserialize_wrapper(rm.deserialize, rpm_manifest)
 
     _maybe_raise_inconsistency_error(ci, rm, 'rpms')
 
@@ -120,6 +161,7 @@ def compose__import_rpms(request, release_id, composeinfo, rpm_manifest):
     cursor = connection.cursor()
     add_to_changelog = []
     imported_rpms = 0
+    variants_info = composeinfo['payload']['variants']
 
     for variant in ci.get_variants(recursive=True):
         _link_compose_to_integrated_product(request, compose_obj, variant)
@@ -133,6 +175,9 @@ def compose__import_rpms(request, release_id, composeinfo, rpm_manifest):
         )
         if created:
             add_to_changelog.append(variant_obj)
+
+        _store_relative_path_for_compose(compose_obj, variants_info, variant, variant_obj, add_to_changelog)
+
         for arch in variant.arches:
             arch_obj = common_models.Arch.objects.get(name=arch)
             var_arch_obj, _ = models.VariantArch.objects.get_or_create(arch=arch_obj,
@@ -169,13 +214,21 @@ def compose__import_rpms(request, release_id, composeinfo, rpm_manifest):
                               'num_linked_rpms': imported_rpms,
                           }))
 
+    if hasattr(request._request, '_messagings'):
+        _add_import_msg(request, compose_obj, 'rpms', imported_rpms)
 
-@transaction.atomic
+    return compose_obj.compose_id, imported_rpms
+
+
+@transaction.atomic(savepoint=False)
 def compose__import_images(request, release_id, composeinfo, image_manifest):
     release_obj = release_models.Release.objects.get(release_id=release_id)
 
-    ci = common_hacks.deserialize_composeinfo(composeinfo)
-    im = common_hacks.deserialize_images(image_manifest)
+    ci = productmd.composeinfo.ComposeInfo()
+    common_hacks.deserialize_wrapper(ci.deserialize, composeinfo)
+
+    im = productmd.images.Images()
+    common_hacks.deserialize_wrapper(im.deserialize, image_manifest)
 
     _maybe_raise_inconsistency_error(ci, im, 'images')
 
@@ -197,6 +250,7 @@ def compose__import_images(request, release_id, composeinfo, image_manifest):
     add_to_changelog = []
     imported_images = 0
 
+    variants_info = composeinfo['payload']['variants']
     for variant in ci.get_variants(recursive=True):
         _link_compose_to_integrated_product(request, compose_obj, variant)
         variant_type = release_models.VariantType.objects.get(name=variant.type)
@@ -209,6 +263,9 @@ def compose__import_images(request, release_id, composeinfo, image_manifest):
         )
         if created:
             add_to_changelog.append(variant_obj)
+
+        _store_relative_path_for_compose(compose_obj, variants_info, variant, variant_obj, add_to_changelog)
+
         for arch in variant.arches:
             arch_obj = common_models.Arch.objects.get(name=arch)
             var_arch_obj, created = models.VariantArch.objects.get_or_create(arch=arch_obj, variant=variant_obj)
@@ -232,6 +289,7 @@ def compose__import_images(request, release_id, composeinfo, image_manifest):
                         'volume_id': i.volume_id,
                         'md5': i.checksums.get("md5", None),
                         'sha1': i.checksums.get("sha1", None),
+                        'subvariant': getattr(i, 'subvariant', None),
                     }
                 )
 
@@ -249,6 +307,59 @@ def compose__import_images(request, release_id, composeinfo, image_manifest):
                               'compose': compose_obj.compose_id,
                               'num_linked_images': imported_images,
                           }))
+
+    if hasattr(request._request, '_messagings'):
+        _add_import_msg(request, compose_obj, 'images', imported_images)
+
+    return compose_obj.compose_id, imported_images
+
+
+def _set_compose_tree_location(request, compose_id, composeinfo, location, url, scheme):
+    ci = productmd.composeinfo.ComposeInfo()
+    common_hacks.deserialize_wrapper(ci.deserialize, composeinfo)
+    num_set_locations = 0
+    synced_content = [item.name for item in ContentCategory.objects.all()]
+
+    for variant in ci.get_variants(recursive=True):
+        variant_uid = variant.uid
+        variant_obj = models.Variant.objects.get(compose__compose_id=compose_id, variant_uid=variant_uid)
+        for arch_name in variant.arches:
+            data = {'compose': compose_id,
+                    'variant': variant_uid,
+                    'arch': arch_name,
+                    'location': location,
+                    'url': url,
+                    'scheme': scheme,
+                    'synced_content': synced_content}
+            request.data['compose'] = compose_id
+            try:
+                obj = models.ComposeTree.objects.get(compose__compose_id=compose_id, variant=variant_obj,
+                                                     arch__name=arch_name, location__short=location)
+                # update
+                serializer = ComposeTreeSerializer(obj, data=data, many=False, context={'request': request})
+            except models.ComposeTree.DoesNotExist:
+                # create
+                serializer = ComposeTreeSerializer(data=data, many=False, context={'request': request})
+
+            if serializer.is_valid(raise_exception=True):
+                serializer.save()
+                num_set_locations += 1
+
+    request.changeset.add('notice', 0, 'null',
+                          json.dumps({
+                              'compose': compose_id,
+                              'num_set_locations': num_set_locations,
+                          }))
+    return num_set_locations
+
+
+@transaction.atomic(savepoint=False)
+def compose__full_import(request, release_id, composeinfo, rpm_manifest, image_manifest, location, url, scheme):
+    compose_id, imported_rpms = compose__import_rpms(request, release_id, composeinfo, rpm_manifest)
+    # if compose__import_images return successfully, it should return same compose id
+    _, imported_images = compose__import_images(request, release_id, composeinfo, image_manifest)
+    set_locations = _set_compose_tree_location(request, compose_id, composeinfo, location, url, scheme)
+    return compose_id, imported_rpms, imported_images, set_locations
 
 
 def _find_composes_srpm_name_with_rpm_nvr(nvr):

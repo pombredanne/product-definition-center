@@ -9,6 +9,8 @@ from django.contrib.contenttypes.models import ContentType
 from rest_framework import serializers
 
 from . import models
+from pdc.apps.compose.models import ComposeAcceptanceTestingState
+from pdc.apps.common.fields import ChoiceSlugField
 from pdc.apps.common.serializers import StrictSerializerMixin, DynamicFieldsSerializerMixin
 
 
@@ -57,15 +59,18 @@ class RPMSerializer(StrictSerializerMixin,
                     serializers.ModelSerializer):
     filename = serializers.CharField(default=DefaultFilenameGenerator())
     linked_releases = serializers.SlugRelatedField(many=True, slug_field='release_id',
-                                                   queryset=models.Release.objects.all(), required=False)
+                                                   queryset=models.Release.objects.all(), required=False, default=[])
     linked_composes = serializers.SlugRelatedField(read_only=True, slug_field='compose_id', many=True)
+    built_for_release = serializers.SlugRelatedField(slug_field='release_id', queryset=models.Release.objects.all(),
+                                                     default=None, allow_null=True)
     dependencies = DependencySerializer(required=False, default={})
+    srpm_nevra = serializers.CharField(required=False, default=None)
 
     class Meta:
         model = models.RPM
         fields = ('id', 'name', 'version', 'epoch', 'release', 'arch', 'srpm_name',
                   'srpm_nevra', 'filename', 'linked_releases', 'linked_composes',
-                  'dependencies')
+                  'dependencies', 'built_for_release')
 
     def create(self, validated_data):
         dependencies = validated_data.pop('dependencies', [])
@@ -98,7 +103,7 @@ class ImageSerializer(StrictSerializerMixin, serializers.ModelSerializer):
         fields = ('file_name', 'image_format', 'image_type', 'disc_number',
                   'disc_count', 'arch', 'mtime', 'size', 'bootable',
                   'implant_md5', 'volume_id', 'md5', 'sha1', 'sha256',
-                  'composes')
+                  'composes', 'subvariant')
 
 
 class RPMRelatedField(serializers.RelatedField):
@@ -206,3 +211,13 @@ class BuildImageSerializer(StrictSerializerMixin, serializers.HyperlinkedModelSe
     class Meta:
         model = models.BuildImage
         fields = ('url', 'image_id', 'image_format', 'md5', 'rpms', 'archives', 'releases')
+
+
+class BuildImageRTTTestsSerializer(StrictSerializerMixin, serializers.ModelSerializer):
+    format = serializers.CharField(source='image_format.name', read_only=True)
+    test_result = ChoiceSlugField(slug_field='name', queryset=ComposeAcceptanceTestingState.objects.all())
+    build_nvr = serializers.CharField(source='image_id', read_only=True)
+
+    class Meta:
+        model = models.BuildImage
+        fields = ('id', 'build_nvr', 'format', 'test_result')

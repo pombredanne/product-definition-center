@@ -3,20 +3,28 @@
 # Licensed under The MIT License (MIT)
 # http://opensource.org/licenses/MIT
 #
+import logging
 import re
+import sys
 
 from django.db import models, connection, transaction
 from django.db.utils import IntegrityError
 from django.core.exceptions import ValidationError
 from django.forms.models import model_to_dict
+from django.dispatch import receiver
+from django.db.backends.signals import connection_created
+from django.db.models.signals import post_migrate
 
 from kobo.rpmlib import parse_nvra
+from productmd import images
 
 from pdc.apps.common.models import get_cached_id
 from pdc.apps.common.validators import validate_md5, validate_sha1, validate_sha256
 from pdc.apps.common.hacks import add_returning, parse_epoch_version
 from pdc.apps.common.constants import ARCH_SRC
 from pdc.apps.release.models import Release
+from pdc.apps.compose.models import ComposeAcceptanceTestingState
+from pdc.apps.package.apps import PackageConfig
 
 
 class RPM(models.Model):
@@ -26,6 +34,7 @@ class RPM(models.Model):
     release             = models.CharField(max_length=200, db_index=True)
     arch                = models.CharField(max_length=200, db_index=True)  # nosrc
     srpm_name           = models.CharField(max_length=200, db_index=True)  # package (name of srpm)
+    built_for_release   = models.ForeignKey('release.Release', null=True, blank=True)
     srpm_nevra          = models.CharField(max_length=200, null=True, blank=True, db_index=True)
     # Well behaved filenames are unique, but that is enforced by having unique NVRA.
     filename            = models.CharField(max_length=4096)
@@ -56,7 +65,7 @@ class RPM(models.Model):
 
     def export(self, fields=None):
         _fields = (set(['name', 'epoch', 'version', 'release', 'arch', 'filename',
-                        'srpm_name', 'srpm_nevra', 'linked_releases', 'dependencies'])
+                        'srpm_name', 'srpm_nevra', 'linked_releases', 'dependencies', 'built_for_release'])
                    if fields is None else set(fields))
         result = model_to_dict(self, fields=_fields - {'linked_releases'})
         if 'linked_releases' in _fields:
@@ -65,6 +74,8 @@ class RPM(models.Model):
                 result['linked_releases'].append(linked_release.release_id)
         if 'dependencies' in _fields:
             result['dependencies'] = self.dependencies
+        if 'built_for_release' in _fields and self.built_for_release:
+            result['built_for_release'] = self.built_for_release.release_id
         return result
 
     @staticmethod
@@ -257,7 +268,7 @@ class Image(models.Model):
     size                = models.BigIntegerField()
 
     bootable            = models.BooleanField(default=False)
-    implant_md5         = models.CharField(max_length=32)
+    implant_md5         = models.CharField(max_length=32, null=True, blank=True)
 
     volume_id           = models.CharField(max_length=32, null=True, blank=True)
 
@@ -265,6 +276,7 @@ class Image(models.Model):
     md5                 = models.CharField(max_length=32, null=True, blank=True, validators=[validate_md5])
     sha1                = models.CharField(max_length=40, null=True, blank=True, validators=[validate_sha1])
     sha256              = models.CharField(max_length=64, validators=[validate_sha256])
+    subvariant          = models.CharField(max_length=4096, blank=True, default='')
 
     class Meta:
         unique_together = (
@@ -300,20 +312,27 @@ class Archive(models.Model):
 
 
 class BuildImage(models.Model):
-    image_id            = models.CharField(max_length=200, unique=True, db_index=True)
+    image_id            = models.CharField(max_length=200)
     image_format        = models.ForeignKey(ImageFormat)
     md5                 = models.CharField(max_length=32, validators=[validate_md5])
 
     rpms                = models.ManyToManyField(RPM)
     archives            = models.ManyToManyField(Archive)
     releases            = models.ManyToManyField(Release)
+    test_result         = models.ForeignKey(ComposeAcceptanceTestingState,
+                                            default=ComposeAcceptanceTestingState.get_untested)
+
+    class Meta:
+        unique_together = (
+            ("image_id", "image_format"),
+        )
 
     def __unicode__(self):
-        return u"%s" % self.image_id
+        return u"%s-%s" % (self.image_id, self.image_format)
 
     def export(self, fields=None):
         _fields = ['image_id', 'image_format', 'md5',
-                   'rpms', 'archives', 'releases'] if fields is None else fields
+                   'rpms', 'archives', 'releases', 'test_result'] if fields is None else fields
         result = dict()
         if 'image_id' in _fields:
             result['image_id'] = self.image_id
@@ -321,6 +340,8 @@ class BuildImage(models.Model):
             result['md5'] = self.md5
         if 'image_format' in _fields:
             result['image_format'] = self.image_format.name
+        if 'test_result' in _fields:
+            result['test_result'] = self.test_result.name
 
         for field in ('rpms', 'archives', 'releases'):
             if field in _fields:
@@ -330,3 +351,29 @@ class BuildImage(models.Model):
                     result[field].append(obj.export())
 
         return result
+
+
+def sync_image_formats_and_types():
+    logger = logging.getLogger(__name__)
+    missing_image_formats = set(images.SUPPORTED_IMAGE_FORMATS) - set([obj.name for obj in ImageFormat.objects.all()])
+    missing_image_types = set(images.SUPPORTED_IMAGE_TYPES) - set([obj.name for obj in ImageType.objects.all()])
+
+    for image_format in missing_image_formats:
+        ImageFormat.objects.create(name=image_format)
+        logger.info("Created image format %s" % image_format)
+    for image_type in missing_image_types:
+        ImageType.objects.create(name=image_type)
+        logger.info("Created image type %s" % image_type)
+
+
+@receiver(connection_created)
+def sync_image_formats_and_types_when_connection_created(sender, **kwargs):
+    if 'test' in sys.argv or 'migrate' in sys.argv:
+        return
+    sync_image_formats_and_types()
+
+
+@receiver(post_migrate)
+def sync_image_formats_and_types_when_post_migrate(sender, **kwargs):
+    if isinstance(sender, PackageConfig):
+        sync_image_formats_and_types()

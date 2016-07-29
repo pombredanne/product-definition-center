@@ -6,7 +6,9 @@
 import os
 import subprocess
 
-VERSION = "0.2.0"
+# NOTE(xchu): After we drop the old contact APIs we should release 0.3.0,
+#             so this could be a release candidate(rc).
+VERSION = "1.0.0"
 
 old_cwd = os.getcwd()
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

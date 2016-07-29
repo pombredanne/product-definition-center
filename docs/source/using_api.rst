@@ -5,6 +5,42 @@ Using API
 
 This page contains details about using PDC from the API user view-point.
 
+PDC API Stability Promise
+-------------------------
+
+Product Definition Center promises API stability and forwards-compatibility of
+APIv1 from version 0.9.0. In a nutshell, this means that code you develop
+against PDC  will continue to work with future releases. You might be required
+to make changes to your usage of the API when changing to a different version of
+the API or when you want to make use of new features.
+
+
+What *stable* means?
+~~~~~~~~~~~~~~~~~~~~
+
+In this context, stable means:
+ * The documented APIs will not be removed or renamed
+ * Arguments for APIs will not be removed or renamed
+ * Keys in returned JSON dictionaries will not be removed or renamed
+ * If new features are added to these APIs – which is quite possible – they will not break or change the meaning of existing methods. In other words, “stable” does not (necessarily) mean *complete*
+ * Default values of optional arguments will not change
+ * Order of returned results will not change for following results:
+    * releases in releases resource API
+    * composes inside compose_set in releases resource API
+    * composes in composes resource API
+ * If, for some reason, an API declared stable must be removed or replaced, it will be declared deprecated in given version of the API and removed/replaced in future version of API
+ * We’ll only break backwards compatibility of these APIs if a bug or security hole makes it completely unavoidable.
+
+To make use of this stability your client code has to accept unknown keys and
+values in responses and ignore them if they are not recognized.
+
+Exceptions
+~~~~~~~~~~
+There are a few exceptions to the above stability promise. Specifically:
+ * APIs marked as *experimental* are not part of promise. This enables us to
+   add new APIs and test them properly before marking them as stable
+ * If a security or other high-impact bug is encountered we might break stability
+   promise. This would be used as last resort. 
 
 Authentication
 --------------
@@ -15,7 +51,7 @@ a custom authentication for performance reasons.
 
 The expected workflow is as follows:
 
-1. Obtain an authorization token from the API ``/rest_api/v1/token/obtain/``.
+1. Obtain an authorization token from the API ``/rest_api/v1/auth/token/obtain/``.
    This is one of end-points that actually use the same authentication system
    as the web UI.
 
@@ -26,7 +62,7 @@ The expected workflow is as follows:
 The token you receive from the API is tied to your user account. Currently, the
 token is valid indefinitely. However, if you leak it somewhere, you can
 manually request a new token, which will invalidate the old one. To do this,
-use the ``/rest_api/v1/token/refresh/`` API.
+use the ``/rest_api/v1/auth/token/refresh/`` API.
 
 If you access the API through one of PDC client, the authentication can be
 handled transparently for you.

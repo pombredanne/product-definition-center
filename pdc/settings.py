@@ -33,7 +33,20 @@ DEBUG = False
 
 ALLOWED_HOSTS = []
 
+# The default number of seconds to cache a page for the cache middleware
+CACHE_MIDDLEWARE_SECONDS = 30
+
 ITEMS_PER_PAGE = 50
+
+# ======== resource permissions configuration =========
+# allow read permission for all users
+ALLOW_ALL_USER_READ = True
+# enable all resource permissions
+DISABLE_RESOURCE_PERMISSION_CHECK = False
+
+
+# send email to admin if one changeset's change is equal or greater than CHANGESET_SIZE_ANNOUNCE
+CHANGESET_SIZE_ANNOUNCE = 1000
 
 # Application definition
 
@@ -61,7 +74,6 @@ INSTALLED_APPS = (
     'pdc.apps.bindings',
     'pdc.apps.usage',
     'pdc.apps.osbs',
-    'pdc.apps.partners',
 
     'mptt',
 )
@@ -94,8 +106,9 @@ REST_FRAMEWORK = {
     'NON_FIELD_ERRORS_KEY': 'detail',
 }
 
-MIDDLEWARE_CLASSES = (
+MIDDLEWARE_CLASSES = [
     'corsheaders.middleware.CorsMiddleware',
+    'django.middleware.cache.UpdateCacheMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -109,7 +122,13 @@ MIDDLEWARE_CLASSES = (
     'pdc.apps.usage.middleware.UsageMiddleware',
     'pdc.apps.changeset.middleware.ChangesetMiddleware',
     'pdc.apps.utils.middleware.MessagingMiddleware',
-)
+    'pdc.apps.utils.middleware.RestrictAdminMiddleware',
+    'django.middleware.cache.FetchFromCacheMiddleware',
+]
+
+if 'test' in sys.argv:
+    MIDDLEWARE_CLASSES.remove('pdc.apps.utils.middleware.RestrictAdminMiddleware')
+    CACHE_MIDDLEWARE_SECONDS = 0
 
 AUTHENTICATION_BACKENDS = (
     'pdc.apps.auth.backends.KerberosUserBackend',

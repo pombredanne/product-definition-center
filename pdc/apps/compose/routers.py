@@ -15,13 +15,12 @@ router.register(r'composes/(?P<compose_id>[^/]+)/rpm-mapping',
                 base_name='composerpmmapping')
 router.register(r'compose-rpms', views.ComposeRPMView)
 router.register(r'compose-images', views.ComposeImageView)
-router.register(r'rpc/compose/import-images',
-                views.ComposeImportImagesView,
-                base_name='composeimportimages')
 
 router.register('overrides/rpm',
                 views.ReleaseOverridesRPMViewSet,
                 base_name='overridesrpm')
+router.register(r'rpc/overrides-rpm/clone', views.OverridesRPMCloneViewSet,
+                base_name='overridesrpmclone')
 router.register(r'rpc/where-to-file-bugs', views.FilterBugzillaProductsAndComponents,
                 base_name='bugzilla')
 router.register('rpc/find-compose-by-release-rpm/(?P<release_id>[^/]+)/(?P<rpm_name>[^/]+)',
@@ -33,5 +32,12 @@ router.register('rpc/find-older-compose-by-compose-rpm/(?P<compose_id>[^/]+)/(?P
 router.register('rpc/find-composes-by-product-version-rpm/(?P<product_version>[^/]+)/(?P<rpm_name>[^/]+)',
                 views.FindComposeByProductVersionRPMViewSet,
                 base_name='findcomposesbypvr')
+router.register('rpc/compose-full-import',
+                views.ComposeFullImportViewSet,
+                base_name='composefullimport')
 router.register(r'compose-tree-locations', views.ComposeTreeViewSet,
                 base_name='composetreelocations')
+router.register(r'compose-tree-rtt-tests', views.ComposeTreeRTTTestViewSet,
+                base_name='composetreertttests')
+router.register(r'compose-image-rtt-tests', views.ComposeImageRTTTestViewSet,
+                base_name='composeimagertttests')

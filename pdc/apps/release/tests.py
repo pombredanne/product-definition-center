@@ -5,6 +5,7 @@
 # http://opensource.org/licenses/MIT
 #
 import json
+import time
 
 from rest_framework.test import APITestCase
 from rest_framework import status
@@ -23,7 +24,7 @@ class BaseProductRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
     ]
 
     def test_create(self):
-        args = {"name": "Our Awesome Product", "short": "product", "version": "1"}
+        args = {"name": "Our Awesome Product", "short": "product", "version": "1", "release_type": "ga"}
         response = self.client.post(reverse('baseproduct-list'), args)
         self.assertEqual(status.HTTP_201_CREATED, response.status_code)
         args.update({'base_product_id': 'product-1'})
@@ -32,19 +33,19 @@ class BaseProductRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertNumChanges([1])
 
     def test_create_with_invalid_short(self):
-        args = {"name": "Fedora", "short": "F", "version": "1"}
+        args = {"name": "Fedora", "short": "F", "version": "1", "release_type": "ga"}
         response = self.client.post(reverse('baseproduct-list'), args)
         self.assertEqual(status.HTTP_400_BAD_REQUEST, response.status_code)
-        self.assertIn('Only accept lowercase letter or -', response.data['short'])
+        self.assertIn('Only accept lowercase letters, numbers or -', response.data['short'])
 
     def test_create_with_extra_fields(self):
-        args = {"name": "Fedora", "short": "f", "version": "1", "foo": "bar"}
+        args = {"name": "Fedora", "short": "f", "version": "1", "release_type": "ga", "foo": "bar"}
         response = self.client.post(reverse('baseproduct-list'), args)
         self.assertEqual(status.HTTP_400_BAD_REQUEST, response.status_code)
         self.assertEqual(response.data.get('detail'), 'Unknown fields: "foo".')
 
     def test_create_duplicate(self):
-        args = {"name": "Our Awesome Product", "short": "product", "version": "1"}
+        args = {"name": "Our Awesome Product", "short": "product", "version": "1", "release_type": "ga"}
         response = self.client.post(reverse('baseproduct-list'), args)
         self.assertEqual(status.HTTP_201_CREATED, response.status_code)
 
@@ -52,7 +53,7 @@ class BaseProductRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertEqual(status.HTTP_400_BAD_REQUEST, response.status_code)
 
     def test_put_as_create_disabled(self):
-        args = {"name": "Our Awesome Product", "short": "product", "version": "1"}
+        args = {"name": "Our Awesome Product", "short": "product", "version": "1", "release_type": "ga"}
         response = self.client.put(reverse('baseproduct-detail', args=['product']), args)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertNumChanges([])
@@ -61,7 +62,7 @@ class BaseProductRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.test_create()
         response = self.client.put(reverse('baseproduct-detail', args=['product-1']),
                                    {'short': 'product', 'name': 'OUR AWESOME PRODUCT',
-                                    'version': '1'},
+                                    'version': '1', 'release_type': 'ga'},
                                    format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(models.BaseProduct.objects.get(base_product_id='product-1').name,
@@ -106,6 +107,15 @@ class BaseProductRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         response = self.client.get(reverse('baseproduct-detail', args=['product-2']))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
+    def test_query_with_multi_values(self):
+        args = {"name": "Our Awesome Product1", "short": "product", "version": "1", "release_type": "ga"}
+        self.client.post(reverse('baseproduct-list'), args)
+        args = {"name": "Our Awesome Product2", "short": "product", "version": "2", "release_type": "ga"}
+        self.client.post(reverse('baseproduct-list'), args)
+        url = reverse('baseproduct-list')
+        response = self.client.get(url + '?version=1&version=2')
+        self.assertEqual(2, response.data['count'])
+
 
 class ProductRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
     fixtures = [
@@ -124,7 +134,7 @@ class ProductRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         args = {'name': 'Fedora', 'short': 'F'}
         response = self.client.post(reverse('product-list'), args)
         self.assertEqual(status.HTTP_400_BAD_REQUEST, response.status_code)
-        self.assertIn('Only accept lowercase letter or -', response.data['short'])
+        self.assertIn('Only accept lowercase letters, numbers or -', response.data['short'])
 
     def test_create_with_extra_field(self):
         args = {'name': 'Fedora', 'short': 'f', 'foo': 'bar'}
@@ -176,6 +186,15 @@ class ProductRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
                                          "name": "Fedora",
                                          "active": False,
                                          "product_versions": []})
+
+    def test_query_with_illegal_active(self):
+        response = self.client.get(reverse('product-list'), {"active": "abcd"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_query_multi_values(self):
+        response = self.client.get(reverse('product-list') + '?short=product&short=dummy')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
 
 
 class ProductUpdateTestCase(TestCaseWithChangeSetMixin, APITestCase):
@@ -271,7 +290,7 @@ class ProductVersionRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertEqual(status.HTTP_400_BAD_REQUEST, response.status_code)
         self.assertEqual(0, models.ProductVersion.objects.filter(product_version_id='product-2').count())
         self.assertNumChanges([])
-        self.assertIn('Only accept lowercase letter or -', response.data['short'])
+        self.assertIn('Only accept lowercase letters, numbers or -', response.data['short'])
 
     def test_create_with_extra_field(self):
         args = {"name": "Our Awesome Product", "short": "product",
@@ -349,6 +368,16 @@ class ProductVersionRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
             response.data.get('releases', []),
             ['product-1.8', 'product-1.9', 'product-1.10', 'product-1.11']
         )
+
+    def test_query_with_illegal_active(self):
+        response = self.client.get(reverse('productversion-list'), {"active": "abcd"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_query_multi_values(self):
+        response = self.client.get(reverse('productversion-list') +
+                                   '?product_version_id=product-1&product_version_id=product-0')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
 
 
 class ProductVersionUpdateRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
@@ -510,9 +539,7 @@ class ActiveFilterTestCase(APITestCase):
 
     def test_filter_product_versions_with_invalid_value(self):
         response = self.client.get(reverse('productversion-list') + '?active=foo')
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(set(x['product_version_id'] for x in response.data['results']),
-                         set(['x-1', 'y-1', 'y-2', 'y-3', 'z-1']))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_filter_active_products(self):
         response = self.client.get(reverse('product-list') + '?active=True')
@@ -528,9 +555,7 @@ class ActiveFilterTestCase(APITestCase):
 
     def test__filter_products_with_invalid_value(self):
         response = self.client.get(reverse('product-list') + '?active=foo')
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(set(x['short'] for x in response.data['results']),
-                         set(['x', 'y', 'z']))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
 
 class ReleaseRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
@@ -590,7 +615,7 @@ class ReleaseRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         args = {"name": "Fedora", "short": "F", "version": '20', "release_type": "ga"}
         response = self.client.post(reverse('release-list'), args)
         self.assertEqual(status.HTTP_400_BAD_REQUEST, response.status_code)
-        self.assertIn('Only accept lowercase letter or -', response.data['short'])
+        self.assertIn('Only accept lowercase letters, numbers or -', response.data['short'])
 
     def test_create_with_extra_fields(self):
         args = {"name": "Fedora", "short": "f", "version": '20', "release_type": "ga", "foo": "bar"}
@@ -627,12 +652,18 @@ class ReleaseRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertEqual(status.HTTP_201_CREATED, response.status_code)
         args.update({'base_product': 'product-1',
                      'active': True, 'compose_set': [], 'dist_git': None,
-                     'release_id': 'supp-1.1-product-1', 'product_version': None,
+                     'release_id': 'supp-1.1@product-1', 'product_version': None,
                      'bugzilla': None, 'integrated_with': None})
         self.assertEqual(args, dict(response.data))
         self.assertNumChanges([1])
         response = self.client.get(reverse('release-list') + '?base_product=product-1')
         self.assertEqual(1, response.data['count'])
+
+    def test_create_with_null_integrated_with(self):
+        args = {"name": "Fedora", "short": "f", "version": "20", "release_type": "ga", "integrated_with": None}
+        response = self.client.post(reverse('release-list'), args, format='json')
+        self.assertEqual(status.HTTP_201_CREATED, response.status_code)
+        self.assertNumChanges([1])
 
     def test_update_with_patch_null_dist_git_mapping(self):
         args = {"name": "Fedora", "short": "f", "version": '20', "release_type": "ga"}
@@ -682,6 +713,18 @@ class ReleaseRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         response = self.client.get(reverse('release-list'), {'foo': 'bar'})
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual('Unknown query params: foo.', response.data.get('detail'))
+
+    def test_query_illegal_active_filter(self):
+        response = self.client.get(reverse('release-list'), {'active': 'abcd'})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_query_with_multi_value_filter(self):
+        args = {"name": "Fedora", "short": "f", "version": '20', "release_type": "ga",
+                "dist_git": {"branch": "dist_git_branch"}}
+        self.client.post(reverse('release-list'), args, format='json')
+        url = reverse('release-list')
+        response = self.client.get(url + '?release_id=release-1.0&release_id=f-20')
+        self.assertEqual(response.data['count'], 2)
 
     def test_list_ordered(self):
         release_type = models.ReleaseType.objects.get(short='ga')
@@ -934,6 +977,23 @@ class ReleaseRPMMappingViewSetTestCase(APITestCase):
                                    args=['product-1.0', 'bash']))
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_get_for_no_compose_without_include(self):
+        compose_models.Compose.objects.filter(release__release_id='release-1.0').delete()
+        response = self.client.get(reverse('releaserpmmapping-detail',
+                                   args=['release-1.0', 'bash']))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_get_for_no_compose_with_include(self):
+        override = compose_models.OverrideRPM.objects.get(id=1)
+        override.include = True
+        override.save()
+
+        compose_models.Compose.objects.filter(release__release_id='release-1.0').delete()
+        response = self.client.get(reverse('releaserpmmapping-detail',
+                                   args=['release-1.0', 'bash']))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, {"compose": None, "mapping": {"Server": {"x86_64": {"bash-doc": ["x86_64"]}}}})
+
     def test_get_for_nonexisting_release(self):
         response = self.client.get(reverse('releaserpmmapping-detail',
                                    args=['product-1.1', 'bash']))
@@ -1007,10 +1067,12 @@ class ReleaseUpdateRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
             version=1,
             name='Product Version'
         )
+        release_type = models.ReleaseType.objects.get(short="ga")
         self.release.base_product = models.BaseProduct.objects.create(
             name='Base Product',
             short='bp',
-            version='1'
+            version='1',
+            release_type=release_type,
         )
         self.release.save()
 
@@ -1026,6 +1088,9 @@ class ReleaseUpdateRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertIsNone(response.data.get('base_product'))
         self.assertIsNone(response.data.get('product_version'))
         self.assertIsNone(response.data.get('dist_git'))
+        self.assertIsNone(response.data.get('bugzilla'))
+        self.assertIsNone(response.data.get('integrated_with'))
+        self.assertEqual(response.data.get('active'), True)
         release = models.Release.objects.get(release_id='release-3.0')
         self.assertIsNone(release.dist_git_branch)
         self.assertIsNone(release.base_product)
@@ -1043,14 +1108,16 @@ class ReleaseUpdateRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertNumChanges([1])
 
     def test_update_can_reset_base_product(self):
+        release_type = models.ReleaseType.objects.get(short="ga")
         self.release.base_product = models.BaseProduct.objects.create(
             name='Base Product',
             short='bp',
-            version='1'
+            version='1',
+            release_type=release_type,
         )
         self.release.save()
 
-        response = self.client.patch(reverse('release-detail', args=['release-1.0-bp-1']),
+        response = self.client.patch(reverse('release-detail', args=['release-1.0@bp-1']),
                                      {'base_product': None}, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         # The dist-git mapping mentioned in changelog because release_id changes.
@@ -1325,10 +1392,11 @@ class ReleaseComposeLinkingTestCase(APITestCase):
 
 class ReleaseImportTestCase(TestCaseWithChangeSetMixin, APITestCase):
     def test_import_correct_data(self):
-        with open('pdc/apps/release/fixtures/tests/composeinfo.json', 'r') as f:
+        with open('pdc/apps/release/fixtures/tests/composeinfo-0.3.json', 'r') as f:
             data = json.loads(f.read())
         response = self.client.post(reverse('releaseimportcomposeinfo-list'), data, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data.get('url'), '/rest_api/v1/releases/tp-1.0/')
         self.assertNumChanges([11])
         self.assertEqual(models.Product.objects.count(), 2)
         self.assertEqual(models.ProductVersion.objects.count(), 2)
@@ -1356,26 +1424,30 @@ class ReleaseImportTestCase(TestCaseWithChangeSetMixin, APITestCase):
                               ['Client.x86_64', 'Server.x86_64', 'Server.s390x',
                                'Server.ppc64', 'Server-SAP.x86_64'])
         self.assertEqual(release.variant_set.get(variant_uid='Server-SAP').integrated_from.release_id,
-                         'sap-1.0-tp-1')
+                         'sap-1.0@tp-1')
 
         response = self.client.get(reverse('product-detail', args=['sap']))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data.get('product_versions'), ['sap-1'])
         response = self.client.get(reverse('productversion-detail', args=['sap-1']))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data.get('releases'), ['sap-1.0-tp-1'])
-        response = self.client.get(reverse('release-detail', args=['sap-1.0-tp-1']))
+        self.assertEqual(response.data.get('releases'), ['sap-1.0@tp-1'])
+        response = self.client.get(reverse('release-detail', args=['sap-1.0@tp-1']))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertDictEqual(dict(response.data),
-                             {'short': 'sap', 'release_id': 'sap-1.0-tp-1', 'version': '1.0',
+                             {'short': 'sap', 'release_id': 'sap-1.0@tp-1', 'version': '1.0',
                               'name': 'SAP', 'product_version': 'sap-1',
                               'base_product': 'tp-1', 'compose_set': [],
                               'integrated_with': 'tp-1.0', 'bugzilla': None,
                               'active': True, 'release_type': 'ga', 'dist_git': None})
-        release = models.Release.objects.get(release_id='sap-1.0-tp-1')
+        release = models.Release.objects.get(release_id='sap-1.0@tp-1')
         self.assertItemsEqual(release.trees, ['Server-SAP.x86_64'])
         self.assertEqual(release.variant_set.get(variant_uid='Server-SAP').integrated_to.release_id,
                          'tp-1.0')
+
+        response = self.client.post(reverse('releaseimportcomposeinfo-list'), data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data.get('url'), '/rest_api/v1/releases/tp-1.0/')
 
     def test_import_via_get(self):
         data = {'garbage': 'really'}
@@ -1388,7 +1460,7 @@ class ReleaseImportTestCase(TestCaseWithChangeSetMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_import_incorrect_layered_product_version_mismatch(self):
-        with open('pdc/apps/release/fixtures/tests/composeinfo.json', 'r') as f:
+        with open('pdc/apps/release/fixtures/tests/composeinfo-0.3.json', 'r') as f:
             data = json.loads(f.read())
         # Import version 1.0
         response = self.client.post(reverse('releaseimportcomposeinfo-list'), data, format='json')
@@ -1401,7 +1473,7 @@ class ReleaseImportTestCase(TestCaseWithChangeSetMixin, APITestCase):
         response = self.client.post(reverse('releaseimportcomposeinfo-list'), data, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('version mismatch', response.content)
-        self.assertIn('sap-1.0-tp-1', response.content)
+        self.assertIn('sap-1.0@tp-1', response.content)
 
 
 class ReleaseTypeTestCase(TestCaseWithChangeSetMixin, APITestCase):
@@ -1418,6 +1490,11 @@ class ReleaseTypeTestCase(TestCaseWithChangeSetMixin, APITestCase):
         response = self.client.get(reverse("releasetype-list"), data={"short": "ga"})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 1)
+
+    def test_filter_multi_value(self):
+        response = self.client.get(reverse("releasetype-list") + '?short=ga&short=updates')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
 
 
 class VariantRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
@@ -1732,3 +1809,279 @@ class VariantRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
                          {'detail': 'Partial update with no changes does not make much sense.',
                           'id_of_invalid_data': 'release-1.0/Server-UID'})
         self.assertNumChanges([])
+
+
+class ReleaseGroupRESTTestCase(TestCaseWithChangeSetMixin, APITestCase):
+
+    fixtures = [
+        "pdc/apps/release/fixtures/tests/release_group_types.json",
+        "pdc/apps/release/fixtures/tests/release_groups.json",
+        "pdc/apps/release/fixtures/tests/release.json"
+    ]
+
+    def test_list(self):
+        url = reverse("releasegroups-list")
+        response = self.client.get(url, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 2)
+
+    def test_retrieve_with_name(self):
+        response = self.client.get(reverse("releasegroups-detail", args=["rhel_test"]))
+        expect_result = {'active': True, 'type': u'Async',
+                         'name': u'rhel_test', 'releases': [u'release-1.0'],
+                         'description': u'good'}
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, expect_result)
+
+    def test_retrieve_with_description_para(self):
+        response = self.client.get(reverse("releasegroups-detail", args=["rhel_test"]),
+                                   args={'description': 'good'}, format='json')
+        expect_result = {'active': True, 'type': u'Async',
+                         'name': u'rhel_test', 'releases': [u'release-1.0'],
+                         'description': u'good'}
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, expect_result)
+
+    def test_create(self):
+        args = {'type': 'Zstream', 'name': 'test', 'description': 'test_create',
+                'releases': [u'release-1.0']}
+        url = reverse("releasegroups-list")
+        response = self.client.post(url, args, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertNumChanges([1])
+
+    def test_create_without_name(self):
+        args = {'type': 'Zstream', 'description': 'test_create',
+                'releases': [u'release-1.0']}
+        url = reverse("releasegroups-list")
+        response = self.client.post(url, args, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_with_duplicate_name(self):
+        args = {'type': 'Zstream', 'name': 'test', 'description': 'test_create',
+                'releases': [u'release-1.0']}
+        url = reverse("releasegroups-list")
+        response = self.client.post(url, args, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        args = {'type': 'QuarterlyUpdate', 'name': 'test', 'description': 'test',
+                'releases': [u'release-1.0']}
+        url = reverse("releasegroups-list")
+        response = self.client.post(url, args, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_with_error_type(self):
+        args = {'type': 'stream', 'name': 'test', 'description': 'test_create',
+                'releases': ['release-1.0']}
+        url = reverse("releasegroups-list")
+        response = self.client.post(url, args, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_without_type(self):
+        args = {'name': 'test', 'description': 'test_create',
+                'releases': [u'release-1.0']}
+        url = reverse("releasegroups-list")
+        response = self.client.post(url, args, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_without_description(self):
+        args = {'type': 'Zstream', 'name': 'test', 'releases': [u'release-1.0']}
+        url = reverse("releasegroups-list")
+        response = self.client.post(url, args, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_with_error_key(self):
+        args = {'Error_key': 'test', 'type': 'Zstream', 'name': 'test', 'description': 'test_create',
+                'releases': [u'release-1.0']}
+        url = reverse("releasegroups-list")
+        response = self.client.post(url, args, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_bulk_create(self):
+        args1 = {'type': 'Zstream', 'name': 'test_bulk1', 'description': 'test1',
+                 'releases': [u'release-1.0']}
+        args2 = {'type': 'Zstream', 'name': 'test_bulk2', 'description': 'test2',
+                 'releases': [u'release-1.0']}
+        args = [args1, args2]
+        url = reverse("releasegroups-list")
+        response = self.client.post(url, args, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertNumChanges([2])
+
+    def test_update(self):
+        args = {'type': 'QuarterlyUpdate', 'name': 'test_update', 'description': 'test',
+                'releases': [u'release-1.0']}
+        response = self.client.put(reverse("releasegroups-detail", args=['rhel_test']),
+                                   args, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNumChanges([1])
+
+    def test_bulk_update(self):
+        args1 = {'type': 'Zstream', 'name': 'test_update1', 'description': 'test1'}
+        args2 = {'type': 'Zstream', 'name': 'test_update2', 'description': 'test2'}
+        data = {'rhel_test': args1, 'rhel_test1': args2}
+        response = self.client.put(reverse("releasegroups-list"), data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNumChanges([2])
+
+    def test_update_without_type(self):
+        self.test_create()
+        args = {'name': 'test_update', 'description': 'test',
+                'releases': [u'release-1.0']}
+        response = self.client.put(reverse("releasegroups-detail", args=['test']),
+                                   args, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_update_without_name(self):
+        self.test_create()
+        args = {'type': 'QuarterlyUpdate', 'description': 'test',
+                'releases': [u'release-1.0']}
+        response = self.client.put(reverse("releasegroups-detail", args=['test']),
+                                   args, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_update_without_description(self):
+        self.test_create()
+        args = {'type': 'QuarterlyUpdate', 'name': 'test_update',
+                'releases': [u'release-1.0']}
+        response = self.client.put(reverse("releasegroups-detail", args=['test']),
+                                   args, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_update_with_error_release(self):
+        args = {'type': 'QuarterlyUpdate', 'name': 'test_update', 'description': 'test',
+                'releases': [u'release']}
+        response = self.client.put(reverse("releasegroups-detail", args=['rhel_test']),
+                                   args, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_delete(self):
+        response = self.client.delete(reverse('releasegroups-detail', args=['rhel_test']))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(models.ReleaseGroup.objects.count(), 1)
+        self.assertNumChanges([1])
+
+    def test_bulk_delete(self):
+        response = self.client.delete(reverse('releasegroups-list'),
+                                      ['rhel_test', 'rhel_test1'], format='json')
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(models.ReleaseGroup.objects.count(), 0)
+        self.assertNumChanges([2])
+
+
+class ReleaseLastModifiedResponseTestCase(TestCaseWithChangeSetMixin, APITestCase):
+    fixtures = [
+        "pdc/apps/release/fixtures/tests/release.json",
+        "pdc/apps/release/fixtures/tests/product.json",
+        "pdc/apps/release/fixtures/tests/base_product.json",
+        "pdc/apps/release/fixtures/tests/product_version.json",
+        "pdc/apps/bindings/fixtures/tests/releasedistgitmapping.json"
+    ]
+
+    def _get_last_modified_epoch(self, response):
+        time_str = response.get('Last-Modified')
+        temp_time = time.strptime(time_str, "%a, %d %b %Y %H:%M:%S %Z")
+        return int(time.mktime(temp_time))
+
+    def test_after_create_last_modified_time_should_change(self):
+        response = self.client.get(reverse('release-list') + '?active=True')
+        before_time = self._get_last_modified_epoch(response)
+        time.sleep(2)
+
+        args = {"name": "Fedora", "short": "f", "version": '20', "release_type": "ga"}
+        response = self.client.post(reverse('release-list'), args)
+        self.assertEqual(status.HTTP_201_CREATED, response.status_code)
+
+        response = self.client.get(reverse('release-list') + '?active=True')
+        after_time = self._get_last_modified_epoch(response)
+        self.assertGreaterEqual(after_time - before_time, 2)
+
+        response = self.client.get(reverse('release-detail', args=['release-1.0']))
+        before_time = self._get_last_modified_epoch(response)
+        time.sleep(3)
+
+        args = {"name": "Fedora", "short": "f", "version": '21', "release_type": "ga"}
+        response = self.client.post(reverse('release-list'), args)
+        self.assertEqual(status.HTTP_201_CREATED, response.status_code)
+
+        response = self.client.get(reverse('release-detail', args=['release-1.0']))
+        after_time = self._get_last_modified_epoch(response)
+        self.assertGreaterEqual(after_time - before_time, 3)
+
+    def test_after_update_last_modified_time_should_change(self):
+        response = self.client.get(reverse('release-list') + '?active=True')
+        before_time = self._get_last_modified_epoch(response)
+        time.sleep(2)
+
+        args = {"active": False}
+        response = self.client.patch(reverse('release-detail',
+                                             kwargs={'release_id': 'release-1.0'}), args, format='json')
+        self.assertEqual(status.HTTP_200_OK, response.status_code)
+
+        url = reverse('release-list') + '?active=True'
+        response = self.client.get(url)
+        after_time = self._get_last_modified_epoch(response)
+        self.assertGreaterEqual(after_time - before_time, 2)
+
+        response = self.client.get(reverse('release-detail', args=['release-1.0']))
+        before_time = self._get_last_modified_epoch(response)
+        time.sleep(3)
+
+        args = {"name": 'test_name'}
+        response = self.client.patch(reverse('release-detail',
+                                             kwargs={'release_id': 'release-1.0'}), args, format='json')
+        self.assertEqual(status.HTTP_200_OK, response.status_code)
+
+        response = self.client.get(reverse('release-detail', args=['release-1.0']))
+        after_time = self._get_last_modified_epoch(response)
+        self.assertGreaterEqual(after_time - before_time, 3)
+
+
+class ProductLastModifiedResponseTestCase(TestCaseWithChangeSetMixin, APITestCase):
+    fixtures = [
+        "pdc/apps/release/fixtures/tests/product.json",
+        "pdc/apps/release/fixtures/tests/base_product.json",
+        "pdc/apps/release/fixtures/tests/product_version.json"
+    ]
+
+    def _get_last_modified_epoch(self, response):
+        time_str = response.get('Last-Modified')
+        temp_time = time.strptime(time_str, "%a, %d %b %Y %H:%M:%S %Z")
+        return int(time.mktime(temp_time))
+
+    def test_after_create_last_modified_time_should_change(self):
+        response = self.client.get(reverse('product-list'))
+        before_time = self._get_last_modified_epoch(response)
+        time.sleep(2)
+
+        args = {"name": "Fedora", "short": "f"}
+        response = self.client.post(reverse('product-list'), args)
+        self.assertEqual(status.HTTP_201_CREATED, response.status_code)
+
+        response = self.client.get(reverse('product-list'))
+        after_time = self._get_last_modified_epoch(response)
+        self.assertGreaterEqual(after_time - before_time, 2)
+
+    def test_after_update_last_modified_time_should_change(self):
+        response = self.client.get(reverse('product-list'))
+        before_time = self._get_last_modified_epoch(response)
+        time.sleep(2)
+
+        self.client.patch(reverse('product-detail', args=['product']), {'name': 'changed_name'}, format='json')
+        response = self.client.get(reverse('product-list'))
+        after_time = self._get_last_modified_epoch(response)
+        self.assertGreaterEqual(after_time - before_time, 2)
+
+    def test_change_product_verion_modified_time_should_change(self):
+        response = self.client.get(reverse('product-list'))
+        before_time = self._get_last_modified_epoch(response)
+        time.sleep(3)
+
+        # add one to product's product version
+        args = {"name": "Our Awesome Product", "short": "product",
+                "version": "2", "product": "product"}
+        response = self.client.post(reverse('productversion-list'), args)
+        self.assertEqual(status.HTTP_201_CREATED, response.status_code)
+
+        response = self.client.get(reverse('product-list'))
+        after_time = self._get_last_modified_epoch(response)
+        self.assertGreaterEqual(after_time - before_time, 3)
